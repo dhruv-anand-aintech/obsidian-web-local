@@ -1,0 +1,24 @@
+{
+  "name": "obsidian-web-local",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "obsidian-web-local": "./bin/obsidian-web-local.mjs"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @obsidian-web-local/shared && npm run build -w @obsidian-web-local/helper && npm run build -w @obsidian-web-local/web",
+    "dev": "npm run build -w @obsidian-web-local/shared && concurrently -n helper,web -c blue,green \"npm run dev -w @obsidian-web-local/helper\" \"npm run dev -w @obsidian-web-local/web\"",
+    "launch": "node ./bin/obsidian-web-local.mjs",
+    "start": "npm run launch",
+    "typecheck": "npm run typecheck -w @obsidian-web-local/shared && npm run typecheck -w @obsidian-web-local/helper && npm run typecheck -w @obsidian-web-local/web"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "playwright": "^1.61.0",
+    "typescript": "^5.9.3"
+  }
+}
