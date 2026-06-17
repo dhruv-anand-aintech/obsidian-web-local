@@ -546,6 +546,7 @@ code {
 
 .kanban-lane__cards {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 12px;
   min-height: 80px;

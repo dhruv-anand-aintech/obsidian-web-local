@@ -5,9 +5,11 @@ import {
   DragOverlay,
   KeyboardSensor,
   PointerSensor,
+  pointerWithin,
   useDroppable,
   useSensor,
   useSensors,
+  type CollisionDetection,
   type DragEndEvent,
   type DragOverEvent,
   type DragStartEvent
@@ -105,6 +107,11 @@ type KanbanBoardProps = {
 const INLINE_ATTRIBUTE_RE = /\[([A-Za-z][A-Za-z0-9_-]*):([^\]]*)\]/g;
 const TAG_RE = /(^|\s)#([^\s#]+)/g;
 const WIKI_LINK_RE = /\[\[([^|\]]+)(?:\|([^\]]+))?\]\]/;
+
+const kanbanCollisionDetection: CollisionDetection = (args) => {
+  const pointerCollisions = pointerWithin(args);
+  return pointerCollisions.length > 0 ? pointerCollisions : closestCorners(args);
+};
 
 function slugify(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
@@ -1315,7 +1322,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
 
       <DndContext
         sensors={sensors}
-        collisionDetection={closestCorners}
+        collisionDetection={kanbanCollisionDetection}
         onDragStart={handleDragStart}
         onDragOver={handleDragOver}
         onDragEnd={(event) => void handleDragEnd(event)}
