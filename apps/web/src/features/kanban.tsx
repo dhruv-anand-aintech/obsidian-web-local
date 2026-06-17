@@ -84,6 +84,12 @@ type ActiveLaneSort = {
   direction: "asc" | "desc";
 };
 
+type CardContextMenuState = {
+  cardId: string;
+  x: number;
+  y: number;
+};
+
 type KanbanBoardProps = {
   note: NoteDetail;
   extensions: ExtensionContribution[];
@@ -264,6 +270,20 @@ function serializeLink(linkTarget: string, title: string) {
   return title && title !== linkTarget ? `[[${linkTarget}|${title}]]` : `[[${linkTarget}]]`;
 }
 
+function serializeCardContent(card: Pick<KanbanCard, "linkTarget" | "title" | "attributes" | "tags" | "resource">) {
+  const parts = [
+    serializeLink(card.linkTarget, card.title),
+    ...card.attributes.map((attribute) => `[${attribute.key}:${attribute.value}]`),
+    ...card.tags.map((tag) => `#${tag}`)
+  ];
+
+  if (card.resource) {
+    parts.push(`[${card.resource.kind}:${card.resource.target}]`);
+  }
+
+  return parts.join(" ");
+}
+
 function serializeBoard(model: KanbanBoardModel) {
   const sections: string[] = [];
 
@@ -273,18 +293,8 @@ function serializeBoard(model: KanbanBoardModel) {
 
   const laneBlocks = model.lanes.map((lane) => {
     const cardLines = lane.cards.flatMap((card) => {
-      const cardLineParts = [
-        `- [${card.checked ? "x" : " "}] ${serializeLink(card.linkTarget, card.title)}`,
-        ...card.attributes.map((attribute) => `[${attribute.key}:${attribute.value}]`),
-        ...card.tags.map((tag) => `#${tag}`)
-      ];
-
-      if (card.resource) {
-        cardLineParts.push(`[${card.resource.kind}:${card.resource.target}]`);
-      }
-
-      const childLines = card.children.map((child) => `\t- child: ${serializeLink(child.linkTarget, child.title)}`);
-      return [cardLineParts.join(" "), ...childLines];
+      const childLines = card.children.map((child) => `\t- child: ${child.rawText || serializeLink(child.linkTarget, child.title)}`);
+      return [`- [${card.checked ? "x" : " "}] ${serializeCardContent(card)}`, ...childLines];
     });
 
     return [`## ${lane.title}`, "", ...cardLines].join("\n");
@@ -468,6 +478,211 @@ function moveCard(board: KanbanBoardModel, activeId: string, overId: string) {
   return { ...board, lanes: nextLanes };
 }
 
+function createUntitledCard(board: KanbanBoardModel): KanbanCard {
+  const existingTitles = new Set(board.lanes.flatMap((lane) => lane.cards.map((card) => card.title)));
+  let index = 1;
+  let title = "Untitled project";
+  while (existingTitles.has(title)) {
+    index += 1;
+    title = `Untitled project ${index}`;
+  }
+
+  return {
+    id: `card-${slugify(title)}`,
+    linkTarget: title,
+    title,
+    checked: false,
+    tags: [],
+    attributes: [],
+    children: [],
+    resource: null
+  };
+}
+
+function mapCardById(board: KanbanBoardModel, cardId: string, mapper: (card: KanbanCard) => KanbanCard) {
+  return {
+    ...board,
+    lanes: board.lanes.map((lane) => ({
+      ...lane,
+      cards: lane.cards.map((card) => (card.id === cardId ? mapper(card) : card))
+    }))
+  };
+}
+
+function updateCardTitle(board: KanbanBoardModel, cardId: string, title: string) {
+  const trimmed = title.trim();
+  if (!trimmed) {
+    return board;
+  }
+
+  return mapCardById(board, cardId, (card) => ({
+    ...card,
+    title: trimmed,
+    linkTarget: card.linkTarget === card.title ? trimmed : card.linkTarget
+  }));
+}
+
+function duplicateCard(board: KanbanBoardModel, cardId: string) {
+  const source = findCardLocation(board, cardId);
+  if (!source) {
+    return board;
+  }
+
+  return {
+    ...board,
+    lanes: board.lanes.map((lane) => {
+      if (lane.id !== source.laneId) {
+        return lane;
+      }
+
+      const card = lane.cards[source.index];
+      if (!card) {
+        return lane;
+      }
+
+      const copy = {
+        ...card,
+        id: `card-${slugify(card.linkTarget || card.title)}-copy-${Date.now()}`,
+        title: `${card.title} copy`,
+        linkTarget: card.linkTarget === card.title ? `${card.title} copy` : card.linkTarget,
+        children: card.children.map((child) => ({ ...child, id: `${child.id}-copy-${Date.now()}` }))
+      };
+      const cards = [...lane.cards];
+      cards.splice(source.index + 1, 0, copy);
+      return { ...lane, cards };
+    })
+  };
+}
+
+function insertCardRelative(board: KanbanBoardModel, cardId: string, position: "before" | "after") {
+  const source = findCardLocation(board, cardId);
+  if (!source) {
+    return board;
+  }
+
+  return {
+    ...board,
+    lanes: board.lanes.map((lane) => {
+      if (lane.id !== source.laneId) {
+        return lane;
+      }
+      const cards = [...lane.cards];
+      cards.splice(position === "before" ? source.index : source.index + 1, 0, createUntitledCard(board));
+      return { ...lane, cards };
+    })
+  };
+}
+
+function moveCardToEdge(board: KanbanBoardModel, cardId: string, edge: "top" | "bottom") {
+  const source = findCardLocation(board, cardId);
+  if (!source) {
+    return board;
+  }
+
+  return {
+    ...board,
+    lanes: board.lanes.map((lane) => {
+      if (lane.id !== source.laneId) {
+        return lane;
+      }
+      const cards = [...lane.cards];
+      const [card] = cards.splice(source.index, 1);
+      if (!card) {
+        return lane;
+      }
+      if (edge === "top") {
+        cards.unshift(card);
+      } else {
+        cards.push(card);
+      }
+      return { ...lane, cards };
+    })
+  };
+}
+
+function deleteCard(board: KanbanBoardModel, cardId: string) {
+  return {
+    ...board,
+    lanes: board.lanes.map((lane) => ({
+      ...lane,
+      cards: lane.cards.filter((card) => card.id !== cardId)
+    }))
+  };
+}
+
+function moveCardToLane(board: KanbanBoardModel, cardId: string, laneId: string) {
+  const source = findCardLocation(board, cardId);
+  if (!source || source.laneId === laneId) {
+    return board;
+  }
+
+  const sourceLane = board.lanes.find((lane) => lane.id === source.laneId);
+  const movedCard = sourceLane?.cards[source.index] ?? null;
+  if (!movedCard) {
+    return board;
+  }
+
+  return {
+    ...board,
+    lanes: board.lanes.map((lane) => {
+      if (lane.id === source.laneId) {
+        return { ...lane, cards: lane.cards.filter((card) => card.id !== cardId) };
+      }
+      if (lane.id === laneId) {
+        return { ...lane, cards: [movedCard, ...lane.cards] };
+      }
+      return lane;
+    })
+  };
+}
+
+function moveCardUnderParent(board: KanbanBoardModel, cardId: string, parentId: string, sorts: Record<string, ActiveLaneSort>) {
+  if (cardId === parentId) {
+    return board;
+  }
+
+  const source = findCardLocation(board, cardId);
+  const parentLocation = findCardLocation(board, parentId);
+  if (!source || !parentLocation) {
+    return board;
+  }
+
+  const sourceLane = board.lanes.find((lane) => lane.id === source.laneId);
+  const movedCard = sourceLane?.cards[source.index] ?? null;
+  if (!movedCard) {
+    return board;
+  }
+
+  const lanesWithoutMovedCard = board.lanes.map((lane) => ({
+    ...lane,
+    cards: lane.cards.filter((card) => card.id !== cardId)
+  }));
+
+  const child: KanbanChild = {
+    id: `child-${slugify(movedCard.linkTarget || movedCard.title)}`,
+    linkTarget: movedCard.linkTarget,
+    title: movedCard.title,
+    rawText: serializeCardContent(movedCard)
+  };
+
+  const nextBoard = {
+    ...board,
+    lanes: lanesWithoutMovedCard.map((lane) => ({
+      ...lane,
+      cards: lane.cards.map((card) =>
+        card.id === parentId
+          ? {
+              ...card,
+              children: [...card.children, child, ...movedCard.children]
+            }
+          : card
+      )
+    }))
+  };
+
+  return applyActiveLaneSorts(nextBoard, sorts);
+}
+
 function LaneDropZone({ laneId, children }: { laneId: string; children: React.ReactNode }) {
   const { setNodeRef } = useDroppable({ id: laneId, data: { type: "lane-drop" } });
   return (
@@ -483,7 +698,8 @@ function SortableLane({
   activeSort,
   onSortChange,
   onAttributeChange,
-  onOpenResource
+  onOpenResource,
+  onCardContextMenu
 }: {
   lane: KanbanLane;
   attributeDefinitions: Record<string, AttributeDefinition>;
@@ -491,6 +707,7 @@ function SortableLane({
   onSortChange: (laneId: string, sort: ActiveLaneSort | undefined) => void;
   onAttributeChange: (cardId: string, key: string, value: string) => void;
   onOpenResource: KanbanBoardProps["onOpenResource"];
+  onCardContextMenu: (cardId: string, event: React.MouseEvent<HTMLElement>) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: lane.id,
@@ -549,6 +766,7 @@ function SortableLane({
               attributeDefinitions={attributeDefinitions}
               onAttributeChange={onAttributeChange}
               onOpenResource={onOpenResource}
+              onCardContextMenu={onCardContextMenu}
             />
           ))}
         </LaneDropZone>
@@ -561,12 +779,14 @@ function SortableCard({
   card,
   attributeDefinitions,
   onAttributeChange,
-  onOpenResource
+  onOpenResource,
+  onCardContextMenu
 }: {
   card: KanbanCard;
   attributeDefinitions: Record<string, AttributeDefinition>;
   onAttributeChange: (cardId: string, key: string, value: string) => void;
   onOpenResource: KanbanBoardProps["onOpenResource"];
+  onCardContextMenu: (cardId: string, event: React.MouseEvent<HTMLElement>) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: card.id,
@@ -581,7 +801,12 @@ function SortableCard({
   const ResourceIcon = card.resource?.kind === "url" && card.resource.isGithub ? GitBranch : FolderOpen;
 
   return (
-    <article className={`kanban-card${isDragging ? " is-dragging" : ""}`} ref={setNodeRef} style={style}>
+    <article
+      className={`kanban-card${isDragging ? " is-dragging" : ""}`}
+      ref={setNodeRef}
+      style={style}
+      onContextMenu={(event) => onCardContextMenu(card.id, event)}
+    >
       <div className="kanban-card__title-row">
         <div className="kanban-card__title-wrap">
           <button className="kanban-handle kanban-handle--card" type="button" aria-label={`Drag card ${card.title}`} {...attributes} {...listeners}>
@@ -714,6 +939,9 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
   const [codexMaxEdits, setCodexMaxEdits] = useState(3);
   const [codexOutput, setCodexOutput] = useState<string | null>(null);
   const [isRunningCodex, setIsRunningCodex] = useState(false);
+  const [cardContextMenu, setCardContextMenu] = useState<CardContextMenuState | null>(null);
+  const [contextParentId, setContextParentId] = useState("");
+  const [contextLaneId, setContextLaneId] = useState("");
 
   useEffect(() => {
     const storedSorts = readStoredLaneSorts(note.path);
@@ -739,9 +967,26 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
     () => new Map(board.lanes.flatMap((lane) => lane.cards.map((card) => [card.id, card] as const))),
     [board]
   );
+  const allCards = useMemo(() => board.lanes.flatMap((lane) => lane.cards), [board]);
   const activeCard = activeId ? cardMap.get(activeId) ?? null : null;
+  const contextCard = cardContextMenu ? cardMap.get(cardContextMenu.cardId) ?? null : null;
+  const parentCandidates = allCards.filter((card) => card.id !== cardContextMenu?.cardId);
   const codexContribution = extensions.find((extension) => extension.pluginId === "codex-board-bar") ?? null;
   const activeAutomations = extensions.filter((extension) => extension.kind === "automation" && extension.enabled);
+
+  useEffect(() => {
+    if (!cardContextMenu) {
+      return;
+    }
+
+    const closeMenu = () => setCardContextMenu(null);
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("keydown", closeMenu);
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("keydown", closeMenu);
+    };
+  }, [cardContextMenu]);
 
   async function persistBoard(nextBoard: KanbanBoardModel) {
     const nextContent = serializeBoard(nextBoard);
@@ -784,6 +1029,68 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
     const nextBoard = updateCardAttribute(board, cardId, key, value, laneSorts);
     setBoard(nextBoard);
     void persistBoard(nextBoard);
+  }
+
+  function handleCardContextMenu(cardId: string, event: React.MouseEvent<HTMLElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setCardContextMenu({
+      cardId,
+      x: Math.min(event.clientX, window.innerWidth - 280),
+      y: Math.min(event.clientY, window.innerHeight - 180)
+    });
+    setContextParentId("");
+    setContextLaneId("");
+  }
+
+  function handleMoveUnderParent() {
+    if (!cardContextMenu || !contextParentId) {
+      return;
+    }
+
+    const nextBoard = moveCardUnderParent(board, cardContextMenu.cardId, contextParentId, laneSorts);
+    setCardContextMenu(null);
+    setContextParentId("");
+    setBoard(nextBoard);
+    void persistBoard(nextBoard);
+  }
+
+  function persistContextBoard(nextBoard: KanbanBoardModel) {
+    setCardContextMenu(null);
+    setContextParentId("");
+    setContextLaneId("");
+    setBoard(nextBoard);
+    void persistBoard(nextBoard);
+  }
+
+  function handleEditContextCard() {
+    if (!contextCard) {
+      return;
+    }
+
+    const nextTitle = window.prompt("Edit card", contextCard.title);
+    if (nextTitle === null) {
+      return;
+    }
+
+    persistContextBoard(updateCardTitle(board, contextCard.id, nextTitle));
+  }
+
+  function handleCopyLinkToCard() {
+    if (!contextCard) {
+      return;
+    }
+
+    void navigator.clipboard.writeText(`[[${note.path}#${contextCard.title}]]`);
+    setCardContextMenu(null);
+  }
+
+  function handleMoveToLane() {
+    if (!cardContextMenu || !contextLaneId) {
+      return;
+    }
+
+    persistContextBoard(moveCardToLane(board, cardContextMenu.cardId, contextLaneId));
   }
 
   function handleDragStart(event: DragStartEvent) {
@@ -942,6 +1249,70 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
       {notice ? <p className="kanban-message kanban-message--success">{notice}</p> : null}
       {actionError ? <p className="kanban-message kanban-message--error">{actionError}</p> : null}
 
+      {cardContextMenu && contextCard ? (
+        <div
+          className="kanban-context-menu"
+          style={{ left: cardContextMenu.x, top: cardContextMenu.y }}
+          role="menu"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="kanban-context-menu__title">{contextCard.title}</div>
+          <div className="kanban-context-menu__items">
+            <button type="button" onClick={handleEditContextCard}>Edit card</button>
+            <button type="button" disabled>New note from card</button>
+            <button type="button" onClick={handleCopyLinkToCard}>Copy link to card</button>
+            <button type="button" disabled>Split card</button>
+            <button type="button" onClick={() => persistContextBoard(duplicateCard(board, contextCard.id))}>Duplicate card</button>
+            <button type="button" onClick={() => persistContextBoard(insertCardRelative(board, contextCard.id, "before"))}>Insert card before</button>
+            <button type="button" onClick={() => persistContextBoard(insertCardRelative(board, contextCard.id, "after"))}>Insert card after</button>
+            <button type="button" onClick={() => persistContextBoard(moveCardToEdge(board, contextCard.id, "top"))}>Move to top</button>
+            <button type="button" onClick={() => persistContextBoard(moveCardToEdge(board, contextCard.id, "bottom"))}>Move to bottom</button>
+            <button type="button" disabled>Archive card</button>
+            <button type="button" onClick={() => persistContextBoard(deleteCard(board, contextCard.id))}>Delete card</button>
+            <button type="button" disabled>Add date</button>
+            <button type="button" disabled>Add time</button>
+          </div>
+          <label className="kanban-context-menu__field">
+            <span>Move under another project</span>
+            <select value={contextParentId} onChange={(event) => setContextParentId(event.currentTarget.value)}>
+              <option value="">Choose project</option>
+              {parentCandidates.map((card) => (
+                <option value={card.id} key={card.id}>
+                  {card.title}
+                </option>
+            ))}
+          </select>
+        </label>
+          <button
+            className="kanban-toolbar-button kanban-toolbar-button--primary"
+            type="button"
+            disabled={!contextParentId}
+            onClick={handleMoveUnderParent}
+          >
+            Move
+          </button>
+          <label className="kanban-context-menu__field">
+            <span>Move to list</span>
+            <select value={contextLaneId} onChange={(event) => setContextLaneId(event.currentTarget.value)}>
+              <option value="">Choose list</option>
+              {board.lanes.map((lane) => (
+                <option value={lane.id} key={lane.id}>
+                  {lane.title}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="kanban-toolbar-button kanban-toolbar-button--primary"
+            type="button"
+            disabled={!contextLaneId}
+            onClick={handleMoveToLane}
+          >
+            Move to list
+          </button>
+        </div>
+      ) : null}
+
       <DndContext
         sensors={sensors}
         collisionDetection={closestCorners}
@@ -958,10 +1329,11 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
                 lane={lane}
                 attributeDefinitions={board.attributeDefinitions}
                 {...(laneSorts[lane.id] ? { activeSort: laneSorts[lane.id] } : {})}
-                onSortChange={handleLaneSortChange}
-                onAttributeChange={handleAttributeChange}
-                onOpenResource={onOpenResource}
-              />
+                  onSortChange={handleLaneSortChange}
+                  onAttributeChange={handleAttributeChange}
+                  onOpenResource={onOpenResource}
+                  onCardContextMenu={handleCardContextMenu}
+                />
             ))}
           </div>
         </SortableContext>

@@ -29,8 +29,8 @@ export function App() {
   const [pluginHost, setPluginHost] = useState<PluginHostStatus | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
-  const [isLeftPaneCollapsed, setIsLeftPaneCollapsed] = useState(false);
-  const [isRightPaneCollapsed, setIsRightPaneCollapsed] = useState(false);
+  const [isLeftPaneCollapsed, setIsLeftPaneCollapsed] = useState(true);
+  const [isRightPaneCollapsed, setIsRightPaneCollapsed] = useState(true);
 
   useEffect(() => {
     let isActive = true;
