@@ -1929,14 +1929,20 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
             type="search"
             placeholder="Search projects, tags, repos, attributes"
             value={filters.query}
-            onChange={(event) => setFilters((current) => ({ ...current, query: event.currentTarget.value }))}
+            onChange={(event) => {
+              const query = event.currentTarget.value;
+              setFilters((current) => ({ ...current, query }));
+            }}
           />
         </label>
 
         <select
           className="kanban-filter-select"
           value={filters.lane}
-          onChange={(event) => setFilters((current) => ({ ...current, lane: event.currentTarget.value }))}
+          onChange={(event) => {
+            const lane = event.currentTarget.value;
+            setFilters((current) => ({ ...current, lane }));
+          }}
         >
           <option value="">All lanes</option>
           {laneFilterOptions.map((lane) => (
@@ -1949,7 +1955,10 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
         <select
           className="kanban-filter-select"
           value={filters.visibility}
-          onChange={(event) => setFilters((current) => ({ ...current, visibility: event.currentTarget.value as BoardFilters["visibility"] }))}
+          onChange={(event) => {
+            const visibility = event.currentTarget.value as BoardFilters["visibility"];
+            setFilters((current) => ({ ...current, visibility }));
+          }}
         >
           <option value="">All repos</option>
           <option value="public">Public</option>
@@ -1959,7 +1968,10 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
         <select
           className="kanban-filter-select"
           value={filters.tag}
-          onChange={(event) => setFilters((current) => ({ ...current, tag: event.currentTarget.value }))}
+          onChange={(event) => {
+            const tag = event.currentTarget.value;
+            setFilters((current) => ({ ...current, tag }));
+          }}
         >
           <option value="">All tags</option>
           {tagFilterOptions.map((tag) => (
@@ -1974,15 +1986,16 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
             className="kanban-filter-select"
             key={attribute.key}
             value={filters.attributes[attribute.key] ?? ""}
-            onChange={(event) =>
+            onChange={(event) => {
+              const value = event.currentTarget.value;
               setFilters((current) => ({
                 ...current,
                 attributes: {
                   ...current.attributes,
-                  [attribute.key]: event.currentTarget.value
+                  [attribute.key]: value
                 }
-              }))
-            }
+              }));
+            }}
           >
             <option value="">All {attribute.label}</option>
             {attribute.values.map((value) => (
