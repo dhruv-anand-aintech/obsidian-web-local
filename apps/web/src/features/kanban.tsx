@@ -23,7 +23,7 @@ import {
   verticalListSortingStrategy
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { FolderOpen, GitBranch, GripVertical, LoaderCircle, PanelLeftClose, PanelLeftOpen, Sparkles, Timer } from "lucide-react";
+import { FolderOpen, GitBranch, Globe2, GripVertical, LoaderCircle, Lock, PanelLeftClose, PanelLeftOpen, Search, Sparkles, Timer, X } from "lucide-react";
 import { parse as parseYaml } from "yaml";
 import type { ExtensionActionResponse, ExtensionContribution, NoteDetail } from "@obsidian-web-local/shared";
 
@@ -117,6 +117,16 @@ type PendingPointerDrag = {
   y: number;
 };
 
+type RepoVisibility = "checking" | "public" | "private";
+
+type BoardFilters = {
+  query: string;
+  lane: string;
+  tag: string;
+  visibility: "" | "public" | "private";
+  attributes: Record<string, string>;
+};
+
 type KanbanBoardProps = {
   note: NoteDetail;
   extensions: ExtensionContribution[];
@@ -132,6 +142,7 @@ type KanbanBoardProps = {
 const INLINE_ATTRIBUTE_RE = /\[([A-Za-z][A-Za-z0-9_-]*):([^\]]*)\]/g;
 const TAG_RE = /(^|\s)#([^\s#]+)/g;
 const WIKI_LINK_RE = /\[\[([^|\]]+)(?:\|([^\]]+))?\]\]/;
+const repoVisibilityCache = new Map<string, RepoVisibility>();
 
 const kanbanCollisionDetection: CollisionDetection = (args) => {
   const pointerCollisions = pointerWithin(args);
@@ -407,6 +418,98 @@ function formatRemaining(endsAt: string) {
 
 function attributeValue(card: KanbanCard, key: string) {
   return card.attributes.find((attribute) => attribute.key === key)?.value ?? "";
+}
+
+function githubRepoKey(target: string) {
+  try {
+    const normalizedTarget = target.endsWith(".git") ? target.slice(0, -4) : target;
+    const url = new URL(normalizedTarget);
+    if (url.hostname !== "github.com" && url.hostname !== "www.github.com") {
+      return null;
+    }
+    const [owner, repo] = url.pathname.split("/").filter(Boolean);
+    if (!owner || !repo) {
+      return null;
+    }
+    return `${owner}/${repo.replace(/\.git$/, "")}`;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveGithubRepoVisibility(repoKey: string): Promise<RepoVisibility> {
+  const cached = repoVisibilityCache.get(repoKey);
+  if (cached && cached !== "checking") {
+    return cached;
+  }
+
+  repoVisibilityCache.set(repoKey, "checking");
+  try {
+    const response = await fetch(`https://api.github.com/repos/${repoKey}`, {
+      headers: { Accept: "application/vnd.github+json" }
+    });
+    const visibility: RepoVisibility = response.ok ? "public" : "private";
+    repoVisibilityCache.set(repoKey, visibility);
+    return visibility;
+  } catch {
+    repoVisibilityCache.set(repoKey, "private");
+    return "private";
+  }
+}
+
+function repoKeyForCard(card: KanbanCard) {
+  return card.resource?.kind === "url" && card.resource.isGithub ? githubRepoKey(card.resource.target) : null;
+}
+
+function repoVisibilityForCard(card: KanbanCard, repoVisibility: Record<string, RepoVisibility>) {
+  const repoKey = repoKeyForCard(card);
+  return repoKey ? repoVisibility[repoKey] ?? repoVisibilityCache.get(repoKey) ?? "checking" : null;
+}
+
+function uniqueSorted(values: string[]) {
+  return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+
+function cardSearchText(card: KanbanCard, laneTitle: string, visibility: RepoVisibility | null) {
+  return [
+    laneTitle,
+    card.title,
+    card.linkTarget,
+    card.resource?.target ?? "",
+    visibility ?? "",
+    ...card.tags,
+    ...card.attributes.flatMap((attribute) => [attribute.key, attribute.value]),
+    ...card.children.flatMap((child) => [child.title, child.linkTarget])
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function cardMatchesFilters(card: KanbanCard, laneTitle: string, filters: BoardFilters, visibility: RepoVisibility | null) {
+  const query = filters.query.trim().toLowerCase();
+  if (query && !cardSearchText(card, laneTitle, visibility).includes(query)) {
+    return false;
+  }
+  if (filters.lane && filters.lane !== laneTitle) {
+    return false;
+  }
+  if (filters.tag && !card.tags.includes(filters.tag)) {
+    return false;
+  }
+  if (filters.visibility && visibility !== filters.visibility) {
+    return false;
+  }
+  return Object.entries(filters.attributes).every(([key, value]) => !value || attributeValue(card, key) === value);
+}
+
+function filterBoard(board: KanbanBoardModel, filters: BoardFilters, repoVisibility: Record<string, RepoVisibility>) {
+  return {
+    ...board,
+    lanes: board.lanes.map((lane) => ({
+      ...lane,
+      cards: lane.cards.filter((card) => cardMatchesFilters(card, lane.title, filters, repoVisibilityForCard(card, repoVisibility)))
+    }))
+  };
 }
 
 function compareAttributeValues(left: string, right: string, definition: AttributeDefinition | undefined, direction: "asc" | "desc") {
@@ -835,6 +938,7 @@ function SortableLane({
   onOpenResource,
   onCardContextMenu,
   selectedCardIds,
+  repoVisibility,
   onCardClick,
   onCardPointerDown
 }: {
@@ -848,6 +952,7 @@ function SortableLane({
   onOpenResource: KanbanBoardProps["onOpenResource"];
   onCardContextMenu: (cardId: string, event: React.MouseEvent<HTMLElement>) => void;
   selectedCardIds: Set<string>;
+  repoVisibility: Record<string, RepoVisibility>;
   onCardClick: (cardId: string, event: React.MouseEvent<HTMLElement>) => void;
   onCardPointerDown: (cardId: string, event: React.PointerEvent<HTMLElement>) => void;
 }) {
@@ -939,6 +1044,7 @@ function SortableLane({
               onOpenResource={onOpenResource}
               onCardContextMenu={onCardContextMenu}
               isSelected={selectedCardIds.has(card.id)}
+              visibility={repoVisibilityForCard(card, repoVisibility)}
               onCardClick={onCardClick}
               onCardPointerDown={onCardPointerDown}
             />
@@ -956,6 +1062,7 @@ function SortableCard({
   onOpenResource,
   onCardContextMenu,
   isSelected,
+  visibility,
   onCardClick,
   onCardPointerDown
 }: {
@@ -965,6 +1072,7 @@ function SortableCard({
   onOpenResource: KanbanBoardProps["onOpenResource"];
   onCardContextMenu: (cardId: string, event: React.MouseEvent<HTMLElement>) => void;
   isSelected: boolean;
+  visibility: RepoVisibility | null;
   onCardClick: (cardId: string, event: React.MouseEvent<HTMLElement>) => void;
   onCardPointerDown: (cardId: string, event: React.PointerEvent<HTMLElement>) => void;
 }) {
@@ -979,6 +1087,7 @@ function SortableCard({
   };
 
   const ResourceIcon = card.resource?.kind === "url" && card.resource.isGithub ? GitBranch : FolderOpen;
+  const VisibilityIcon = visibility === "public" ? Globe2 : Lock;
   const {
     onPointerDown: sortablePointerDown,
     ...sortableListeners
@@ -1032,11 +1141,24 @@ function SortableCard({
 
       {card.tags.length > 0 ? (
         <div className="kanban-card__tags">
+          {visibility ? (
+            <span className={`kanban-repo-pill kanban-repo-pill--${visibility}`}>
+              <VisibilityIcon size={12} />
+              <span>{visibility === "checking" ? "Checking" : visibility}</span>
+            </span>
+          ) : null}
           {card.tags.map((tag) => (
             <span className="kanban-tag" key={`${card.id}-${tag}`}>
               #{tag}
             </span>
           ))}
+        </div>
+      ) : visibility ? (
+        <div className="kanban-card__tags">
+          <span className={`kanban-repo-pill kanban-repo-pill--${visibility}`}>
+            <VisibilityIcon size={12} />
+            <span>{visibility === "checking" ? "Checking" : visibility}</span>
+          </span>
         </div>
       ) : null}
 
@@ -1156,6 +1278,8 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
   const [focusDuration, setFocusDuration] = useState(20);
   const [focusRemaining, setFocusRemaining] = useState("");
   const [isFocusBusy, setIsFocusBusy] = useState(false);
+  const [repoVisibility, setRepoVisibility] = useState<Record<string, RepoVisibility>>({});
+  const [filters, setFilters] = useState<BoardFilters>({ query: "", lane: "", tag: "", visibility: "", attributes: {} });
   const [cardContextMenu, setCardContextMenu] = useState<CardContextMenuState | null>(null);
   const [contextParentId, setContextParentId] = useState("");
   const [contextLaneId, setContextLaneId] = useState("");
@@ -1170,6 +1294,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
     setBoard(nextBoard);
     setSelectedCardIds(new Set());
     setLastSelectedCardId(null);
+    setFilters({ query: "", lane: "", tag: "", visibility: "", attributes: {} });
     setNotice(null);
     setActionError(null);
 
@@ -1268,12 +1393,72 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
     [board]
   );
   const allCards = useMemo(() => board.lanes.flatMap((lane) => lane.cards), [board]);
+  const visibleBoard = useMemo(() => filterBoard(board, filters, repoVisibility), [board, filters, repoVisibility]);
+  const visibleCardCount = useMemo(() => visibleBoard.lanes.reduce((count, lane) => count + lane.cards.length, 0), [visibleBoard]);
+  const totalCardCount = allCards.length;
+  const laneFilterOptions = useMemo(() => board.lanes.map((lane) => lane.title), [board]);
+  const tagFilterOptions = useMemo(() => uniqueSorted(allCards.flatMap((card) => card.tags)), [allCards]);
+  const attributeFilterOptions = useMemo(() => {
+    const options = new Map<string, Set<string>>();
+    for (const card of allCards) {
+      for (const attribute of card.attributes) {
+        if (!options.has(attribute.key)) {
+          options.set(attribute.key, new Set());
+        }
+        if (attribute.value) {
+          options.get(attribute.key)?.add(attribute.value);
+        }
+      }
+    }
+    return [...options.entries()].map(([key, values]) => ({
+      key,
+      label: board.attributeDefinitions[key]?.shortLabel ?? board.attributeDefinitions[key]?.label ?? key,
+      values: uniqueSorted([...values])
+    }));
+  }, [allCards, board.attributeDefinitions]);
+  const hasActiveFilters = Boolean(
+    filters.query.trim() ||
+      filters.lane ||
+      filters.tag ||
+      filters.visibility ||
+      Object.values(filters.attributes).some(Boolean)
+  );
   const projectNames = useMemo(() => allCards.map((card) => card.linkTarget || card.title).filter(Boolean), [allCards]);
   const activeCard = activeId ? cardMap.get(activeId) ?? null : null;
   const contextCard = cardContextMenu ? cardMap.get(cardContextMenu.cardId) ?? null : null;
   const parentCandidates = allCards.filter((card) => card.id !== cardContextMenu?.cardId);
   const codexContribution = extensions.find((extension) => extension.pluginId === "codex-board-bar") ?? null;
   const activeAutomations = extensions.filter((extension) => extension.kind === "automation" && extension.enabled);
+
+  useEffect(() => {
+    const repoKeys = uniqueSorted(allCards.map((card) => repoKeyForCard(card) ?? ""));
+    if (!repoKeys.length) {
+      setRepoVisibility({});
+      return;
+    }
+
+    let isActive = true;
+    setRepoVisibility((current) => {
+      const next = { ...current };
+      for (const repoKey of repoKeys) {
+        next[repoKey] = next[repoKey] ?? repoVisibilityCache.get(repoKey) ?? "checking";
+      }
+      return next;
+    });
+
+    void Promise.all(
+      repoKeys.map(async (repoKey) => {
+        const visibility = await resolveGithubRepoVisibility(repoKey);
+        if (isActive) {
+          setRepoVisibility((current) => ({ ...current, [repoKey]: visibility }));
+        }
+      })
+    );
+
+    return () => {
+      isActive = false;
+    };
+  }, [allCards]);
 
   useEffect(() => {
     if (!cardContextMenu) {
@@ -1639,6 +1824,9 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
         <div className="kanban-board__toolbar-left">
           <span className="kanban-board__label">Kanban</span>
           <span className="kanban-board__meta">{board.lanes.length} lanes</span>
+          <span className="kanban-board__meta">
+            {visibleCardCount}/{totalCardCount} cards
+          </span>
           {activeAutomations.map((extension) => (
             <span className="kanban-board__meta kanban-board__meta--success" key={extension.pluginId}>
               {extension.name}
@@ -1660,6 +1848,85 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
             </button>
           ) : null}
         </div>
+      </div>
+
+      <div className="kanban-filter-bar">
+        <label className="kanban-search-field">
+          <Search size={14} />
+          <input
+            type="search"
+            placeholder="Search projects, tags, repos, attributes"
+            value={filters.query}
+            onChange={(event) => setFilters((current) => ({ ...current, query: event.currentTarget.value }))}
+          />
+        </label>
+
+        <select
+          className="kanban-filter-select"
+          value={filters.lane}
+          onChange={(event) => setFilters((current) => ({ ...current, lane: event.currentTarget.value }))}
+        >
+          <option value="">All lanes</option>
+          {laneFilterOptions.map((lane) => (
+            <option key={lane} value={lane}>
+              {lane}
+            </option>
+          ))}
+        </select>
+
+        <select
+          className="kanban-filter-select"
+          value={filters.visibility}
+          onChange={(event) => setFilters((current) => ({ ...current, visibility: event.currentTarget.value as BoardFilters["visibility"] }))}
+        >
+          <option value="">All repos</option>
+          <option value="public">Public</option>
+          <option value="private">Private</option>
+        </select>
+
+        <select
+          className="kanban-filter-select"
+          value={filters.tag}
+          onChange={(event) => setFilters((current) => ({ ...current, tag: event.currentTarget.value }))}
+        >
+          <option value="">All tags</option>
+          {tagFilterOptions.map((tag) => (
+            <option key={tag} value={tag}>
+              #{tag}
+            </option>
+          ))}
+        </select>
+
+        {attributeFilterOptions.map((attribute) => (
+          <select
+            className="kanban-filter-select"
+            key={attribute.key}
+            value={filters.attributes[attribute.key] ?? ""}
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                attributes: {
+                  ...current.attributes,
+                  [attribute.key]: event.currentTarget.value
+                }
+              }))
+            }
+          >
+            <option value="">All {attribute.label}</option>
+            {attribute.values.map((value) => (
+              <option key={`${attribute.key}-${value}`} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        ))}
+
+        {hasActiveFilters ? (
+          <button className="kanban-filter-clear" type="button" onClick={() => setFilters({ query: "", lane: "", tag: "", visibility: "", attributes: {} })}>
+            <X size={14} />
+            <span>Clear</span>
+          </button>
+        ) : null}
       </div>
 
       {showFocusTimer && focusContribution ? (
@@ -1836,9 +2103,9 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
         onDragEnd={(event) => void handleDragEnd(event)}
         onDragCancel={handleDragCancel}
       >
-        <SortableContext items={board.lanes.map((lane) => lane.id)} strategy={horizontalListSortingStrategy}>
+        <SortableContext items={visibleBoard.lanes.map((lane) => lane.id)} strategy={horizontalListSortingStrategy}>
           <div className="kanban-lanes">
-            {board.lanes.map((lane) => (
+            {visibleBoard.lanes.map((lane) => (
               <SortableLane
                 key={lane.id}
                 lane={lane}
@@ -1851,6 +2118,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
                 onOpenResource={onOpenResource}
                 onCardContextMenu={handleCardContextMenu}
                 selectedCardIds={selectedCardIds}
+                repoVisibility={repoVisibility}
                 onCardClick={handleCardClick}
                 onCardPointerDown={handleCardPointerDown}
               />
