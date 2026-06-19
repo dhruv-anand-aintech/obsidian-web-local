@@ -23,7 +23,7 @@ import {
   verticalListSortingStrategy
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { FolderOpen, GitBranch, Globe2, GripVertical, LoaderCircle, Lock, PanelLeftClose, PanelLeftOpen, Search, Sparkles, Timer, X } from "lucide-react";
+import { FolderOpen, GitBranch, Globe2, GripVertical, LoaderCircle, Lock, PanelLeftClose, PanelLeftOpen, RefreshCw, Search, Sparkles, Timer, X } from "lucide-react";
 import { parse as parseYaml } from "yaml";
 import type { ExtensionActionResponse, ExtensionContribution, NoteDetail } from "@obsidian-web-local/shared";
 
@@ -132,6 +132,7 @@ type KanbanBoardProps = {
   extensions: ExtensionContribution[];
   projectNames: Record<string, string>;
   repoVisibilities: Record<string, "public" | "private">;
+  onRefreshRepoVisibilities: () => Promise<Record<string, "public" | "private">>;
   onPersist: (notePath: string, content: string) => Promise<NoteDetail>;
   onOpenResource: (target: string, kind: "url" | "path") => Promise<void>;
   onRunExtensionAction: (payload: {
@@ -1324,7 +1325,16 @@ function CardOverlay({
   );
 }
 
-export function KanbanBoard({ note, extensions, projectNames, repoVisibilities, onPersist, onOpenResource, onRunExtensionAction }: KanbanBoardProps) {
+export function KanbanBoard({
+  note,
+  extensions,
+  projectNames,
+  repoVisibilities,
+  onRefreshRepoVisibilities,
+  onPersist,
+  onOpenResource,
+  onRunExtensionAction
+}: KanbanBoardProps) {
   const [laneSorts, setLaneSorts] = useState<Record<string, ActiveLaneSort>>(() => readStoredLaneSorts(note.path));
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(() => readCollapsedLanes(note.path));
   const [board, setBoard] = useState<KanbanBoardModel>(() => applyActiveLaneSorts(parseKanbanNote(note), readStoredLaneSorts(note.path)));
@@ -1347,6 +1357,7 @@ export function KanbanBoard({ note, extensions, projectNames, repoVisibilities, 
   const [focusDuration, setFocusDuration] = useState(20);
   const [focusRemaining, setFocusRemaining] = useState("");
   const [isFocusBusy, setIsFocusBusy] = useState(false);
+  const [isRefreshingRepos, setIsRefreshingRepos] = useState(false);
   const [filters, setFilters] = useState<BoardFilters>({ query: "", lane: "", tag: "", visibility: "", attributes: {} });
   const [cardContextMenu, setCardContextMenu] = useState<CardContextMenuState | null>(null);
   const [contextParentId, setContextParentId] = useState("");
@@ -1869,6 +1880,20 @@ export function KanbanBoard({ note, extensions, projectNames, repoVisibilities, 
     await runFocusAction("record", focusPayload());
   }
 
+  async function refreshRepoVisibilityCache() {
+    setIsRefreshingRepos(true);
+    setActionError(null);
+    try {
+      const nextVisibilities = await onRefreshRepoVisibilities();
+      const repoCount = Object.keys(nextVisibilities).length;
+      setNotice(`Refreshed visibility for ${repoCount} GitHub repos.`);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Failed to refresh repo visibility");
+    } finally {
+      setIsRefreshingRepos(false);
+    }
+  }
+
   return (
     <section className="kanban-board">
       <div className="kanban-board__toolbar">
@@ -1943,6 +1968,11 @@ export function KanbanBoard({ note, extensions, projectNames, repoVisibilities, 
           <option value="public">Public</option>
           <option value="private">Private</option>
         </select>
+
+        <button className="kanban-filter-clear" type="button" disabled={isRefreshingRepos} onClick={() => void refreshRepoVisibilityCache()}>
+          <RefreshCw size={14} className={isRefreshingRepos ? "spin" : undefined} />
+          <span>{isRefreshingRepos ? "Refreshing" : "Refresh repos"}</span>
+        </button>
 
         <select
           className="kanban-filter-select"

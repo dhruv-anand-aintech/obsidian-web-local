@@ -60,6 +60,10 @@ export interface VaultDetail {
   extensionContributions: ExtensionContribution[];
 }
 
+export interface RefreshRepoVisibilitiesResponse {
+  repoVisibilities: Record<string, "public" | "private">;
+}
+
 export interface CompatibilityCapability {
   key: string;
   providedBy: "browser" | "helper" | "bridge";

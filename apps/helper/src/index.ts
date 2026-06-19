@@ -4,7 +4,7 @@ import { execFile } from "node:child_process";
 import type { ExtensionActionRequest, OpenResourceRequest, UpdateNoteRequest } from "@obsidian-web-local/shared";
 import { runExtensionAction } from "./extension-host.js";
 import { buildPluginHostStatus } from "./plugin-host.js";
-import { getNoteDetail, getVaultDetail, listVaults, updateNoteDetail } from "./vault-service.js";
+import { getNoteDetail, getVaultDetail, listVaults, refreshRepoVisibilities, updateNoteDetail } from "./vault-service.js";
 
 const server = Fastify({
   logger: true
@@ -58,6 +58,17 @@ server.get<{ Params: { vaultId: string } }>("/api/vaults/:vaultId", async (reque
   }
 
   return vault;
+});
+
+server.post<{ Params: { vaultId: string } }>("/api/vaults/:vaultId/repo-visibilities/refresh", async (request, reply) => {
+  const result = await refreshRepoVisibilities(request.params.vaultId);
+
+  if (!result) {
+    reply.status(404);
+    return { error: "Vault not found" };
+  }
+
+  return result;
 });
 
 server.get<{ Params: { vaultId: string }; Querystring: { path?: string } }>(

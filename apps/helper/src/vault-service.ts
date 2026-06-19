@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { access, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -18,6 +18,8 @@ const MARKDOWN_EXTENSION = ".md";
 const OBSIDIAN_FOLDER = ".obsidian";
 const PLUGIN_FOLDER = "plugins";
 const DAILY_WORK_REPORT_PROJECT_NAMES = path.join("daily-work-report", "config", "project_names.json");
+const WEB_LOCAL_FOLDER = path.join(OBSIDIAN_FOLDER, "obsidian-web-local");
+const REPO_VISIBILITY_CACHE = path.join(WEB_LOCAL_FOLDER, "repo-visibilities.json");
 const GITHUB_URL_RE = /\[url:(https:\/\/github\.com\/[^\]\s]+)\]/g;
 const execFileAsync = promisify(execFile);
 
@@ -104,10 +106,49 @@ async function collectGithubRepoKeys(markdownFiles: string[]) {
   return repoKeys;
 }
 
-async function loadRepoVisibilities(markdownFiles: string[]): Promise<Record<string, "public" | "private">> {
+function repoVisibilityCachePath(vaultPath: string) {
+  return path.join(vaultPath, REPO_VISIBILITY_CACHE);
+}
+
+async function readRepoVisibilityCache(vaultPath: string): Promise<Record<string, "public" | "private">> {
+  try {
+    const parsed = JSON.parse(await readFile(repoVisibilityCachePath(vaultPath), "utf8")) as {
+      repoVisibilities?: Record<string, unknown>;
+    };
+    return Object.fromEntries(
+      Object.entries(parsed.repoVisibilities ?? {}).filter((entry): entry is [string, "public" | "private"] =>
+        entry[1] === "public" || entry[1] === "private"
+      )
+    );
+  } catch {
+    return {};
+  }
+}
+
+async function writeRepoVisibilityCache(vaultPath: string, repoVisibilities: Record<string, "public" | "private">) {
+  const cachePath = repoVisibilityCachePath(vaultPath);
+  await mkdir(path.dirname(cachePath), { recursive: true });
+  await writeFile(
+    cachePath,
+    `${JSON.stringify({ updatedAt: new Date().toISOString(), repoVisibilities }, null, 2)}\n`,
+    "utf8"
+  );
+}
+
+async function loadRepoVisibilities(vaultPath: string): Promise<Record<string, "public" | "private">> {
+  return readRepoVisibilityCache(vaultPath);
+}
+
+export async function refreshRepoVisibilities(vaultId: string): Promise<{ repoVisibilities: Record<string, "public" | "private"> } | null> {
+  const resolved = await resolveVaultPath(vaultId);
+  if (!resolved) {
+    return null;
+  }
+
+  const markdownFiles = await collectMarkdownFiles(resolved.vaultPath);
   const repoKeys = await collectGithubRepoKeys(markdownFiles);
   const owners = [...new Set([...repoKeys].map(githubOwner).filter(Boolean))];
-  const visibilities: Record<string, "public" | "private"> = {};
+  const visibilities = await readRepoVisibilityCache(resolved.vaultPath);
 
   for (const owner of owners) {
     try {
@@ -128,7 +169,8 @@ async function loadRepoVisibilities(markdownFiles: string[]): Promise<Record<str
     }
   }
 
-  return visibilities;
+  await writeRepoVisibilityCache(resolved.vaultPath, visibilities);
+  return { repoVisibilities: visibilities };
 }
 
 async function isVaultDirectory(candidatePath: string): Promise<boolean> {
@@ -377,7 +419,7 @@ export async function getVaultDetail(vaultId: string): Promise<VaultDetail | nul
   const [extensionContributions, projectNames, repoVisibilities] = await Promise.all([
     getExtensionContributions(vaultPath, pluginManifests),
     loadProjectNames(vaultPath),
-    loadRepoVisibilities(markdownFiles)
+    loadRepoVisibilities(vaultPath)
   ]);
 
   return {

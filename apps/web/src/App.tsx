@@ -4,6 +4,7 @@ import type {
   ExtensionActionResponse,
   NoteDetail,
   PluginHostStatus,
+  RefreshRepoVisibilitiesResponse,
   UpdateNoteResponse,
   VaultDetail,
   VaultSummary
@@ -234,6 +235,24 @@ export function App() {
     return (await response.json()) as ExtensionActionResponse;
   }
 
+  async function refreshRepoVisibilities(): Promise<Record<string, "public" | "private">> {
+    if (!selectedVaultId) {
+      throw new Error("No vault selected");
+    }
+
+    const response = await fetch(`/api/vaults/${selectedVaultId}/repo-visibilities/refresh`, {
+      method: "POST"
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to refresh repo visibilities: ${response.status}`);
+    }
+
+    const payload = (await response.json()) as RefreshRepoVisibilitiesResponse;
+    setSelectedVault((current) => current ? { ...current, repoVisibilities: payload.repoVisibilities } : current);
+    return payload.repoVisibilities;
+  }
+
   const shellClassName = [
     "shell",
     isLeftPaneCollapsed ? "shell--left-collapsed" : "",
@@ -379,6 +398,7 @@ export function App() {
                 extensions: selectedVault?.extensionContributions ?? [],
                 projectNames: selectedVault?.projectNames ?? {},
                 repoVisibilities: selectedVault?.repoVisibilities ?? {},
+                onRefreshRepoVisibilities: refreshRepoVisibilities,
                 onPersist: persistNote,
                 onOpenResource: openResource,
                 onRunExtensionAction: runExtensionAction
