@@ -131,6 +131,7 @@ type KanbanBoardProps = {
   note: NoteDetail;
   extensions: ExtensionContribution[];
   projectNames: Record<string, string>;
+  repoVisibilities: Record<string, "public" | "private">;
   onPersist: (notePath: string, content: string) => Promise<NoteDetail>;
   onOpenResource: (target: string, kind: "url" | "path") => Promise<void>;
   onRunExtensionAction: (payload: {
@@ -143,7 +144,6 @@ type KanbanBoardProps = {
 const INLINE_ATTRIBUTE_RE = /\[([A-Za-z][A-Za-z0-9_-]*):([^\]]*)\]/g;
 const TAG_RE = /(^|\s)#([^\s#]+)/g;
 const WIKI_LINK_RE = /\[\[([^|\]]+)(?:\|([^\]]+))?\]\]/;
-const repoVisibilityCache = new Map<string, RepoVisibility>();
 
 const kanbanCollisionDetection: CollisionDetection = (args) => {
   const pointerCollisions = pointerWithin(args);
@@ -438,33 +438,13 @@ function githubRepoKey(target: string) {
   }
 }
 
-async function resolveGithubRepoVisibility(repoKey: string): Promise<RepoVisibility> {
-  const cached = repoVisibilityCache.get(repoKey);
-  if (cached && cached !== "checking") {
-    return cached;
-  }
-
-  repoVisibilityCache.set(repoKey, "checking");
-  try {
-    const response = await fetch(`https://api.github.com/repos/${repoKey}`, {
-      headers: { Accept: "application/vnd.github+json" }
-    });
-    const visibility: RepoVisibility = response.ok ? "public" : "private";
-    repoVisibilityCache.set(repoKey, visibility);
-    return visibility;
-  } catch {
-    repoVisibilityCache.set(repoKey, "private");
-    return "private";
-  }
-}
-
 function repoKeyForCard(card: KanbanCard) {
   return card.resource?.kind === "url" && card.resource.isGithub ? githubRepoKey(card.resource.target) : null;
 }
 
 function repoVisibilityForCard(card: KanbanCard, repoVisibility: Record<string, RepoVisibility>) {
   const repoKey = repoKeyForCard(card);
-  return repoKey ? repoVisibility[repoKey] ?? repoVisibilityCache.get(repoKey) ?? "checking" : null;
+  return repoKey ? repoVisibility[repoKey] ?? "checking" : null;
 }
 
 function uniqueSorted(values: string[]) {
@@ -1344,7 +1324,7 @@ function CardOverlay({
   );
 }
 
-export function KanbanBoard({ note, extensions, projectNames, onPersist, onOpenResource, onRunExtensionAction }: KanbanBoardProps) {
+export function KanbanBoard({ note, extensions, projectNames, repoVisibilities, onPersist, onOpenResource, onRunExtensionAction }: KanbanBoardProps) {
   const [laneSorts, setLaneSorts] = useState<Record<string, ActiveLaneSort>>(() => readStoredLaneSorts(note.path));
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(() => readCollapsedLanes(note.path));
   const [board, setBoard] = useState<KanbanBoardModel>(() => applyActiveLaneSorts(parseKanbanNote(note), readStoredLaneSorts(note.path)));
@@ -1367,7 +1347,6 @@ export function KanbanBoard({ note, extensions, projectNames, onPersist, onOpenR
   const [focusDuration, setFocusDuration] = useState(20);
   const [focusRemaining, setFocusRemaining] = useState("");
   const [isFocusBusy, setIsFocusBusy] = useState(false);
-  const [repoVisibility, setRepoVisibility] = useState<Record<string, RepoVisibility>>({});
   const [filters, setFilters] = useState<BoardFilters>({ query: "", lane: "", tag: "", visibility: "", attributes: {} });
   const [cardContextMenu, setCardContextMenu] = useState<CardContextMenuState | null>(null);
   const [contextParentId, setContextParentId] = useState("");
@@ -1482,6 +1461,7 @@ export function KanbanBoard({ note, extensions, projectNames, onPersist, onOpenR
     [board]
   );
   const allCards = useMemo(() => board.lanes.flatMap((lane) => lane.cards), [board]);
+  const repoVisibility = repoVisibilities as Record<string, RepoVisibility>;
   const visibleBoard = useMemo(() => filterBoard(board, filters, repoVisibility, projectNames), [board, filters, projectNames, repoVisibility]);
   const visibleCardCount = useMemo(() => visibleBoard.lanes.reduce((count, lane) => count + lane.cards.length, 0), [visibleBoard]);
   const totalCardCount = allCards.length;
@@ -1526,36 +1506,6 @@ export function KanbanBoard({ note, extensions, projectNames, onPersist, onOpenR
   const parentCandidates = allCards.filter((card) => !contextCardIds.includes(card.id));
   const codexContribution = extensions.find((extension) => extension.pluginId === "codex-board-bar") ?? null;
   const activeAutomations = extensions.filter((extension) => extension.kind === "automation" && extension.enabled);
-
-  useEffect(() => {
-    const repoKeys = uniqueSorted(allCards.map((card) => repoKeyForCard(card) ?? ""));
-    if (!repoKeys.length) {
-      setRepoVisibility({});
-      return;
-    }
-
-    let isActive = true;
-    setRepoVisibility((current) => {
-      const next = { ...current };
-      for (const repoKey of repoKeys) {
-        next[repoKey] = next[repoKey] ?? repoVisibilityCache.get(repoKey) ?? "checking";
-      }
-      return next;
-    });
-
-    void Promise.all(
-      repoKeys.map(async (repoKey) => {
-        const visibility = await resolveGithubRepoVisibility(repoKey);
-        if (isActive) {
-          setRepoVisibility((current) => ({ ...current, [repoKey]: visibility }));
-        }
-      })
-    );
-
-    return () => {
-      isActive = false;
-    };
-  }, [allCards]);
 
   useEffect(() => {
     if (!cardContextMenu) {

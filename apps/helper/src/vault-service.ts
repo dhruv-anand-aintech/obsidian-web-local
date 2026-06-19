@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { access, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import type {
   NoteDetail,
   NoteSummary,
@@ -16,6 +18,8 @@ const MARKDOWN_EXTENSION = ".md";
 const OBSIDIAN_FOLDER = ".obsidian";
 const PLUGIN_FOLDER = "plugins";
 const DAILY_WORK_REPORT_PROJECT_NAMES = path.join("daily-work-report", "config", "project_names.json");
+const GITHUB_URL_RE = /\[url:(https:\/\/github\.com\/[^\]\s]+)\]/g;
+const execFileAsync = promisify(execFile);
 
 function expandHome(inputPath: string): string {
   if (inputPath === "~") {
@@ -59,6 +63,72 @@ async function loadProjectNames(vaultPath: string): Promise<Record<string, strin
   }
 
   return {};
+}
+
+function githubRepoKey(target: string) {
+  try {
+    const normalizedTarget = target.endsWith(".git") ? target.slice(0, -4) : target;
+    const url = new URL(normalizedTarget);
+    if (url.hostname !== "github.com" && url.hostname !== "www.github.com") {
+      return null;
+    }
+    const [owner, repo] = url.pathname.split("/").filter(Boolean);
+    if (!owner || !repo) {
+      return null;
+    }
+    return `${owner}/${repo.replace(/\.git$/, "")}`;
+  } catch {
+    return null;
+  }
+}
+
+function githubOwner(repoKey: string) {
+  return repoKey.split("/")[0] ?? "";
+}
+
+async function collectGithubRepoKeys(markdownFiles: string[]) {
+  const repoKeys = new Set<string>();
+  for (const filePath of markdownFiles) {
+    try {
+      const text = await readFile(filePath, "utf8");
+      for (const match of text.matchAll(GITHUB_URL_RE)) {
+        const repoKey = githubRepoKey(match[1] ?? "");
+        if (repoKey) {
+          repoKeys.add(repoKey);
+        }
+      }
+    } catch {
+      // Notes can be deleted or unreadable between discovery and detail loading.
+    }
+  }
+  return repoKeys;
+}
+
+async function loadRepoVisibilities(markdownFiles: string[]): Promise<Record<string, "public" | "private">> {
+  const repoKeys = await collectGithubRepoKeys(markdownFiles);
+  const owners = [...new Set([...repoKeys].map(githubOwner).filter(Boolean))];
+  const visibilities: Record<string, "public" | "private"> = {};
+
+  for (const owner of owners) {
+    try {
+      const { stdout } = await execFileAsync(
+        "gh",
+        ["repo", "list", owner, "--limit", "1000", "--json", "nameWithOwner,visibility"],
+        { timeout: 15_000, maxBuffer: 1024 * 1024 }
+      );
+      const repos = JSON.parse(stdout) as Array<{ nameWithOwner?: string; visibility?: string }>;
+      for (const repo of repos) {
+        if (!repo.nameWithOwner || !repoKeys.has(repo.nameWithOwner)) {
+          continue;
+        }
+        visibilities[repo.nameWithOwner] = repo.visibility === "PUBLIC" ? "public" : "private";
+      }
+    } catch {
+      // If gh is unavailable, leave these repos unresolved rather than guessing.
+    }
+  }
+
+  return visibilities;
 }
 
 async function isVaultDirectory(candidatePath: string): Promise<boolean> {
@@ -304,13 +374,18 @@ export async function getVaultDetail(vaultId: string): Promise<VaultDetail | nul
     collectMarkdownFiles(vaultPath),
     collectPluginManifests(vaultPath)
   ]);
-  const extensionContributions = await getExtensionContributions(vaultPath, pluginManifests);
+  const [extensionContributions, projectNames, repoVisibilities] = await Promise.all([
+    getExtensionContributions(vaultPath, pluginManifests),
+    loadProjectNames(vaultPath),
+    loadRepoVisibilities(markdownFiles)
+  ]);
 
   return {
     id,
     name: path.basename(vaultPath),
     path: vaultPath,
-    projectNames: await loadProjectNames(vaultPath),
+    projectNames,
+    repoVisibilities,
     notes: (await Promise.all(markdownFiles.map((filePath) => buildNoteSummary(vaultPath, filePath)))).sort((left, right) =>
       left.path.localeCompare(right.path)
     ),

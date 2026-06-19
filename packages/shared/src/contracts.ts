@@ -54,6 +54,7 @@ export interface VaultDetail {
   name: string;
   path: string;
   projectNames: Record<string, string>;
+  repoVisibilities: Record<string, "public" | "private">;
   notes: NoteSummary[];
   pluginManifests: PluginManifestSummary[];
   extensionContributions: ExtensionContribution[];

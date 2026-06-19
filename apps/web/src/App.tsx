@@ -378,6 +378,7 @@ export function App() {
               activeRenderer.render(selectedNote, {
                 extensions: selectedVault?.extensionContributions ?? [],
                 projectNames: selectedVault?.projectNames ?? {},
+                repoVisibilities: selectedVault?.repoVisibilities ?? {},
                 onPersist: persistNote,
                 onOpenResource: openResource,
                 onRunExtensionAction: runExtensionAction
