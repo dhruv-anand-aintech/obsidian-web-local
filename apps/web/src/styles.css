@@ -358,6 +358,7 @@ code {
 
 .panel--content {
   min-width: 0;
+  overflow: hidden;
 }
 
 .panel__header-actions {
@@ -367,12 +368,48 @@ code {
   gap: 8px;
 }
 
+.sync-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 24px;
+  padding: 3px 7px;
+  border: 1px solid #4a4a4a;
+  border-radius: 999px;
+  color: #b9b9b9;
+  background: #262626;
+  font-family: "SFMono-Regular", "SF Mono", Monaco, monospace;
+  font-size: 0.68rem;
+  line-height: 1.2;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.sync-pill--saving {
+  border-color: #7d6ac2;
+  color: #c8bbff;
+}
+
+.sync-pill--synced {
+  border-color: rgba(126, 220, 139, 0.55);
+  color: #7edc8b;
+  background: rgba(56, 116, 65, 0.18);
+}
+
+.sync-pill--error {
+  border-color: rgba(255, 154, 154, 0.65);
+  color: #ff9a9a;
+  background: rgba(122, 42, 42, 0.2);
+}
+
 .kanban-board,
 .markdown-note {
   display: flex;
   flex-direction: column;
   gap: 16px;
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .kanban-board__toolbar {
@@ -573,12 +610,15 @@ code {
 }
 
 .kanban-lanes {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: max-content;
+  display: flex;
+  align-items: stretch;
   gap: 16px;
+  min-width: 0;
+  max-width: 100%;
   overflow-x: auto;
+  overflow-y: hidden;
   padding-bottom: 8px;
+  scrollbar-gutter: stable;
 }
 
 .kanban-lane {
@@ -590,11 +630,13 @@ code {
   border: 1px solid #393939;
   border-radius: 8px;
   background: #252525;
+  flex: 0 0 min(320px, calc(100vw - 64px));
   width: min(320px, calc(100vw - 64px));
-  min-width: 0;
+  min-width: min(320px, calc(100vw - 64px));
 }
 
 .kanban-lane-pin {
+  flex: 0 0 46px;
   width: 46px;
   min-height: 260px;
   border: 1px solid #393939;

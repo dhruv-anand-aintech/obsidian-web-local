@@ -1659,12 +1659,6 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
               <span>Codex</span>
             </button>
           ) : null}
-          {isSaving ? (
-            <span className="kanban-save-indicator">
-              <LoaderCircle size={14} className="spin" />
-              <span>Saving</span>
-            </span>
-          ) : null}
         </div>
       </div>
 

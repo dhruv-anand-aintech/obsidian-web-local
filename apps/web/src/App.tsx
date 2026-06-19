@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { CheckCircle2, LoaderCircle, XCircle } from "lucide-react";
 import type {
   ExtensionActionResponse,
   NoteDetail,
@@ -10,6 +11,7 @@ import type {
 import { noteRenderers } from "./features/renderers";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
+type SyncState = "synced" | "saving" | "error";
 
 async function fetchJson<T>(url: string): Promise<T> {
   const response = await fetch(url);
@@ -29,6 +31,7 @@ export function App() {
   const [pluginHost, setPluginHost] = useState<PluginHostStatus | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   const [error, setError] = useState<string | null>(null);
+  const [syncState, setSyncState] = useState<SyncState>("synced");
   const [isLeftPaneCollapsed, setIsLeftPaneCollapsed] = useState(true);
   const [isRightPaneCollapsed, setIsRightPaneCollapsed] = useState(true);
 
@@ -124,6 +127,8 @@ export function App() {
       return;
     }
 
+    setSyncState("synced");
+
     const activeVaultId = selectedVaultId;
     const activeNotePath = selectedNotePath;
     let isActive = true;
@@ -166,21 +171,29 @@ export function App() {
       throw new Error("No vault selected");
     }
 
-    const response = await fetch(`/api/vaults/${selectedVaultId}/note`, {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({ path: notePath, content })
-    });
+    setSyncState("saving");
 
-    if (!response.ok) {
-      throw new Error(`Failed to persist note: ${response.status}`);
+    try {
+      const response = await fetch(`/api/vaults/${selectedVaultId}/note`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ path: notePath, content })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Failed to persist note: ${response.status}`);
+      }
+
+      const payload = (await response.json()) as UpdateNoteResponse;
+      setSelectedNote(payload.note);
+      setSyncState("synced");
+      return payload.note;
+    } catch (persistError) {
+      setSyncState("error");
+      throw persistError;
     }
-
-    const payload = (await response.json()) as UpdateNoteResponse;
-    setSelectedNote(payload.note);
-    return payload.note;
   }
 
   async function openResource(target: string, kind: "url" | "path"): Promise<void> {
@@ -350,6 +363,14 @@ export function App() {
               <div className="panel__header-actions">
                 {activeRenderer && <span className="badge">{activeRenderer.label}</span>}
                 {selectedNote && <span className="badge">{new Date(selectedNote.updatedAt).toLocaleString()}</span>}
+                {selectedNote && (
+                  <span className={`sync-pill sync-pill--${syncState}`}>
+                    {syncState === "saving" ? <LoaderCircle size={14} className="spin" /> : null}
+                    {syncState === "synced" ? <CheckCircle2 size={14} /> : null}
+                    {syncState === "error" ? <XCircle size={14} /> : null}
+                    <span>{syncState === "saving" ? "Saving" : syncState === "synced" ? "Synced" : "Sync failed"}</span>
+                  </span>
+                )}
               </div>
             </div>
 
