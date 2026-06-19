@@ -42,7 +42,7 @@ export interface PluginManifestSummary {
 export interface ExtensionContribution {
   pluginId: string;
   name: string;
-  kind: "command-bar" | "automation";
+  kind: "command-bar" | "automation" | "focus-timer";
   placement: "board-toolbar" | "background";
   enabled: boolean;
   description?: string;
@@ -79,6 +79,7 @@ export interface ExtensionActionResponse {
   ok: boolean;
   message: string;
   output?: string;
+  data?: unknown;
 }
 
 export interface OpenResourceRequest {

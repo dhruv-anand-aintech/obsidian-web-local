@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type {
   ExtensionActionRequest,
@@ -9,6 +9,7 @@ import type {
 } from "@obsidian-web-local/shared";
 
 const BOARD_PATH = "PROJECTS-KANBAN.md";
+const FOCUS_LOG_PATH = "Focus-Time-Log.md";
 const BOARD_AUTOCOMMIT_DEBOUNCE_MS = 10_000;
 const DEFAULT_CODEX_SETTINGS = {
   codexPath: process.env.CODEX_PATH ?? "codex",
@@ -36,6 +37,25 @@ type BoardChanges = {
 type CodexBoardBarSettings = typeof DEFAULT_CODEX_SETTINGS & {
   workspaceRoot: string;
   boardPath: string;
+};
+
+type FocusQueueItem = {
+  project: string;
+  note: string;
+  durationMinutes: number;
+};
+
+type FocusTimerState = {
+  durationMinutes: number;
+  logPath: string;
+  queue: FocusQueueItem[];
+  current: null | {
+    project: string;
+    note: string;
+    durationMinutes: number;
+    startedAt: string;
+    endsAt: string;
+  };
 };
 
 type BrowserExtensionAdapterContext = {
@@ -260,6 +280,161 @@ async function readCodexBoardBarSettings(vaultPath: string): Promise<CodexBoardB
   }
 }
 
+function pad(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+function localIso(date = new Date()) {
+  const offsetMin = -date.getTimezoneOffset();
+  const sign = offsetMin >= 0 ? "+" : "-";
+  const abs = Math.abs(offsetMin);
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}${sign}${pad(Math.floor(abs / 60))}:${pad(abs % 60)}`;
+}
+
+function localDay(date = new Date()) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function normalizeFocusItem(input: unknown, fallbackDuration: number): FocusQueueItem {
+  const payload = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  const project = String(payload.project ?? "").trim();
+  const note = String(payload.note ?? "").trim();
+  const durationMinutes = Math.max(
+    1,
+    Number.parseInt(String(payload.durationMinutes ?? fallbackDuration), 10) || fallbackDuration
+  );
+  if (!project) {
+    throw new Error("Project is required.");
+  }
+  return { project, note, durationMinutes };
+}
+
+function focusDataPath(vaultPath: string) {
+  return path.join(vaultPath, ".obsidian", "plugins", "project-focus-timer", "data.json");
+}
+
+async function readFocusTimerState(vaultPath: string): Promise<FocusTimerState> {
+  const defaults: FocusTimerState = {
+    durationMinutes: 20,
+    logPath: FOCUS_LOG_PATH,
+    queue: [],
+    current: null
+  };
+
+  try {
+    const raw = await readFile(focusDataPath(vaultPath), "utf8");
+    const parsed = JSON.parse(raw) as Partial<FocusTimerState>;
+    return {
+      ...defaults,
+      ...parsed,
+      queue: Array.isArray(parsed.queue) ? parsed.queue : [],
+      current: parsed.current?.startedAt ? parsed.current : null
+    };
+  } catch {
+    return defaults;
+  }
+}
+
+async function writeFocusTimerState(vaultPath: string, state: FocusTimerState) {
+  const dataPath = focusDataPath(vaultPath);
+  await mkdir(path.dirname(dataPath), { recursive: true });
+  await writeFile(dataPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+function focusEntryLine(entry: Record<string, unknown>) {
+  const type = String(entry.type ?? "started");
+  const label = type === "completed" ? "completed" : type === "abandoned" ? "abandoned" : "started";
+  const project = String(entry.project ?? "");
+  const note = String(entry.note ?? "");
+  const duration = Number(entry.duration_minutes ?? 20);
+  const queue = Array.isArray(entry.queue) && entry.queue.length
+    ? `; queued: ${entry.queue.map((item) => String((item as FocusQueueItem).project ?? "")).filter(Boolean).join(", ")}`
+    : "";
+  const suffix = note ? ` - ${note}` : "";
+  return `- ${String(entry.started_at ?? entry.timestamp)} - ${label} ${duration}m on [[${project}]]${suffix}${queue}\n  <!-- focus-session ${JSON.stringify(entry)} -->\n`;
+}
+
+async function appendFocusLog(vaultPath: string, logPath: string, entry: Record<string, unknown>) {
+  const absoluteLogPath = path.join(vaultPath, logPath || FOCUS_LOG_PATH);
+  const day = localDay(new Date(String(entry.timestamp ?? Date.now())));
+  let text = "# Focus Time Log\n\n";
+  try {
+    text = await readFile(absoluteLogPath, "utf8");
+  } catch {
+    await mkdir(path.dirname(absoluteLogPath), { recursive: true });
+  }
+
+  if (!text.includes(`## ${day}`)) {
+    text = `${text.trimEnd()}\n\n## ${day}\n`;
+  }
+
+  await writeFile(absoluteLogPath, `${text.trimEnd()}\n${focusEntryLine(entry)}`, "utf8");
+}
+
+async function startFocusSession(vaultPath: string, state: FocusTimerState, item: FocusQueueItem) {
+  if (state.current) {
+    throw new Error("A focus block is already running.");
+  }
+  const started = new Date();
+  const ends = new Date(started.getTime() + item.durationMinutes * 60 * 1000);
+  state.durationMinutes = item.durationMinutes;
+  state.current = {
+    project: item.project,
+    note: item.note,
+    durationMinutes: item.durationMinutes,
+    startedAt: localIso(started),
+    endsAt: localIso(ends)
+  };
+  await appendFocusLog(vaultPath, state.logPath, {
+    type: "started",
+    timestamp: localIso(started),
+    started_at: localIso(started),
+    ends_at: localIso(ends),
+    project: item.project,
+    note: item.note,
+    duration_minutes: item.durationMinutes,
+    queue: state.queue.slice(0, 8)
+  });
+}
+
+async function recordFocusSession(vaultPath: string, state: FocusTimerState, item: FocusQueueItem) {
+  const finished = new Date();
+  const started = new Date(finished.getTime() - item.durationMinutes * 60 * 1000);
+  state.durationMinutes = item.durationMinutes;
+  await appendFocusLog(vaultPath, state.logPath, {
+    type: "completed",
+    timestamp: localIso(finished),
+    started_at: localIso(started),
+    ended_at: localIso(finished),
+    project: item.project,
+    note: item.note,
+    duration_minutes: item.durationMinutes,
+    actual_minutes: item.durationMinutes,
+    recorded: true,
+    queue: state.queue.slice(0, 8)
+  });
+}
+
+async function finishFocusSession(vaultPath: string, state: FocusTimerState, type: "completed" | "abandoned") {
+  if (!state.current) {
+    return;
+  }
+  const finished = new Date();
+  const startedMs = new Date(state.current.startedAt).getTime();
+  await appendFocusLog(vaultPath, state.logPath, {
+    type,
+    timestamp: localIso(finished),
+    started_at: state.current.startedAt,
+    ended_at: localIso(finished),
+    project: state.current.project,
+    note: state.current.note,
+    duration_minutes: state.current.durationMinutes,
+    actual_minutes: Math.max(1, Math.round((finished.getTime() - startedMs) / 60000)),
+    queue: state.queue.slice(0, 8)
+  });
+  state.current = null;
+}
+
 function buildPrompt(userPrompt: string, boardPath: string, maxEdits: number, extraInstructions: string) {
   const lines = [
     `Edit only ${boardPath}.`,
@@ -353,6 +528,98 @@ const adapters: BrowserExtensionAdapter[] = [
 
       scheduleBoardCommit(context.repoPath, notePath);
       return [`Auto-commit scheduled for ${BOARD_AUTOCOMMIT_DEBOUNCE_MS / 1000}s after the last board edit.`];
+    }
+  },
+  {
+    pluginId: "project-focus-timer",
+    async getContribution(context) {
+      if (!context.enabledPlugins.has("project-focus-timer")) {
+        return null;
+      }
+
+      const state = await readFocusTimerState(context.vaultPath);
+      return {
+        pluginId: "project-focus-timer",
+        name: "Project Focus Timer",
+        kind: "focus-timer",
+        placement: "board-toolbar",
+        enabled: true,
+        description: "Project-backed focus timer with queued blocks and Markdown time logs.",
+        config: {
+          durationMinutes: state.durationMinutes,
+          logPath: state.logPath,
+          queueLength: state.queue.length,
+          hasCurrent: Boolean(state.current)
+        }
+      };
+    },
+    async invokeAction(context, action) {
+      if (!context.enabledPlugins.has("project-focus-timer")) {
+        return { ok: false, message: "Project Focus Timer is not enabled in this vault." };
+      }
+
+      const state = await readFocusTimerState(context.vaultPath);
+      try {
+        if (action.actionId === "status") {
+          return { ok: true, message: "Project Focus Timer status.", data: state };
+        }
+
+        if (action.actionId === "start") {
+          await startFocusSession(context.vaultPath, state, normalizeFocusItem(action.payload, state.durationMinutes));
+          await writeFocusTimerState(context.vaultPath, state);
+          return { ok: true, message: `Started ${state.current?.durationMinutes ?? state.durationMinutes}m on ${state.current?.project}.`, data: state };
+        }
+
+        if (action.actionId === "queue") {
+          state.queue.push(normalizeFocusItem(action.payload, state.durationMinutes));
+          await writeFocusTimerState(context.vaultPath, state);
+          return { ok: true, message: "Focus block queued.", data: state };
+        }
+
+        if (action.actionId === "record") {
+          const item = normalizeFocusItem(action.payload, state.durationMinutes);
+          await recordFocusSession(context.vaultPath, state, item);
+          await writeFocusTimerState(context.vaultPath, state);
+          return { ok: true, message: `Recorded ${item.durationMinutes}m on ${item.project}.`, data: state };
+        }
+
+        if (action.actionId === "startQueued") {
+          if (state.current) {
+            throw new Error("A focus block is already running.");
+          }
+          const index = Math.max(0, Number.parseInt(String(action.payload?.index ?? 0), 10) || 0);
+          const [item] = state.queue.splice(index, 1);
+          if (!item) {
+            throw new Error("Queued focus block not found.");
+          }
+          await startFocusSession(context.vaultPath, state, item);
+          await writeFocusTimerState(context.vaultPath, state);
+          return { ok: true, message: `Started queued block on ${item.project}.`, data: state };
+        }
+
+        if (action.actionId === "removeQueued") {
+          const index = Number.parseInt(String(action.payload?.index ?? -1), 10);
+          if (index < 0 || index >= state.queue.length) {
+            throw new Error("Queued focus block not found.");
+          }
+          state.queue.splice(index, 1);
+          await writeFocusTimerState(context.vaultPath, state);
+          return { ok: true, message: "Queued focus block removed.", data: state };
+        }
+
+        if (action.actionId === "finish" || action.actionId === "abandon") {
+          await finishFocusSession(context.vaultPath, state, action.actionId === "finish" ? "completed" : "abandoned");
+          await writeFocusTimerState(context.vaultPath, state);
+          return { ok: true, message: action.actionId === "finish" ? "Focus block completed." : "Focus block abandoned.", data: state };
+        }
+
+        return { ok: false, message: `Unsupported action: ${action.actionId}` };
+      } catch (error) {
+        return {
+          ok: false,
+          message: error instanceof Error ? error.message : "Project Focus Timer action failed."
+        };
+      }
     }
   },
   {

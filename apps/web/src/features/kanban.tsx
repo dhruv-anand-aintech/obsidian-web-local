@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   closestCorners,
   DndContext,
@@ -23,7 +23,7 @@ import {
   verticalListSortingStrategy
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { FolderOpen, GitBranch, GripVertical, LoaderCircle, Sparkles } from "lucide-react";
+import { ChevronsLeftRight, FolderOpen, GitBranch, GripVertical, LoaderCircle, Sparkles, Timer } from "lucide-react";
 import { parse as parseYaml } from "yaml";
 import type { ExtensionActionResponse, ExtensionContribution, NoteDetail } from "@obsidian-web-local/shared";
 
@@ -86,7 +86,32 @@ type ActiveLaneSort = {
   direction: "asc" | "desc";
 };
 
+type FocusQueueItem = {
+  project: string;
+  note: string;
+  durationMinutes: number;
+};
+
+type FocusTimerState = {
+  durationMinutes: number;
+  logPath: string;
+  queue: FocusQueueItem[];
+  current: null | {
+    project: string;
+    note: string;
+    durationMinutes: number;
+    startedAt: string;
+    endsAt: string;
+  };
+};
+
 type CardContextMenuState = {
+  cardId: string;
+  x: number;
+  y: number;
+};
+
+type PendingPointerDrag = {
   cardId: string;
   x: number;
   y: number;
@@ -320,6 +345,10 @@ function sortStorageKey(notePath: string) {
   return `obsidian-web-local:kanban-sort:${notePath}`;
 }
 
+function collapsedLaneStorageKey(notePath: string) {
+  return `obsidian-web-local:kanban-collapsed-lanes:${notePath}`;
+}
+
 function readStoredLaneSorts(notePath: string): Record<string, ActiveLaneSort> {
   try {
     const raw = window.localStorage.getItem(sortStorageKey(notePath));
@@ -347,6 +376,33 @@ function writeStoredLaneSorts(notePath: string, sorts: Record<string, ActiveLane
   } catch {
     // localStorage can be unavailable in hardened browser contexts.
   }
+}
+
+function readCollapsedLanes(notePath: string): Set<string> {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(collapsedLaneStorageKey(notePath)) ?? "[]") as unknown;
+    return new Set(Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeCollapsedLanes(notePath: string, collapsed: Set<string>) {
+  try {
+    window.localStorage.setItem(collapsedLaneStorageKey(notePath), JSON.stringify([...collapsed]));
+  } catch {
+    // localStorage can be unavailable in hardened browser contexts.
+  }
+}
+
+function isFocusTimerState(value: unknown): value is FocusTimerState {
+  return Boolean(value && typeof value === "object" && "queue" in value && Array.isArray((value as FocusTimerState).queue));
+}
+
+function formatRemaining(endsAt: string) {
+  const remaining = Math.max(0, new Date(endsAt).getTime() - Date.now());
+  const seconds = Math.ceil(remaining / 1000);
+  return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function attributeValue(card: KanbanCard, key: string) {
@@ -444,6 +500,36 @@ function findCardLocation(board: KanbanBoardModel, cardId: string): CardLocation
   return null;
 }
 
+function dropTargetFromPoint(x: number, y: number): string | null {
+  const elements = document.elementsFromPoint(x, y);
+  for (const element of elements) {
+    const card = element.closest<HTMLElement>("[data-card-id]");
+    if (card?.dataset.cardId) {
+      return card.dataset.cardId;
+    }
+    const lane = element.closest<HTMLElement>("[data-lane-id]");
+    if (lane?.dataset.laneId) {
+      return lane.dataset.laneId;
+    }
+  }
+  return null;
+}
+
+function orderedSelectedCards(board: KanbanBoardModel, selectedIds: Set<string>) {
+  return board.lanes.flatMap((lane) => lane.cards.filter((card) => selectedIds.has(card.id)));
+}
+
+function cardIdsBetween(board: KanbanBoardModel, startId: string, endId: string) {
+  const ids = board.lanes.flatMap((lane) => lane.cards.map((card) => card.id));
+  const start = ids.indexOf(startId);
+  const end = ids.indexOf(endId);
+  if (start === -1 || end === -1) {
+    return [endId];
+  }
+  const [from, to] = start < end ? [start, end] : [end, start];
+  return ids.slice(from, to + 1);
+}
+
 function moveCard(board: KanbanBoardModel, activeId: string, overId: string) {
   const source = findCardLocation(board, activeId);
   if (!source) {
@@ -481,6 +567,45 @@ function moveCard(board: KanbanBoardModel, activeId: string, overId: string) {
   } else {
     destinationLane.cards.push(movedCard);
   }
+
+  return { ...board, lanes: nextLanes };
+}
+
+function moveCardGroup(board: KanbanBoardModel, activeId: string, selectedIds: Set<string>, overId: string) {
+  const idsToMove = selectedIds.has(activeId) ? selectedIds : new Set([activeId]);
+  if (idsToMove.size <= 1) {
+    return moveCard(board, activeId, overId);
+  }
+
+  const movingCards = orderedSelectedCards(board, idsToMove);
+  if (!movingCards.length) {
+    return board;
+  }
+
+  const targetLane = findLane(board, overId) ?? null;
+  const target = findCardLocation(board, overId);
+  const destinationLaneId = targetLane?.id ?? target?.laneId;
+  if (!destinationLaneId) {
+    return board;
+  }
+
+  let insertIndex = target ? target.index : board.lanes.find((lane) => lane.id === destinationLaneId)?.cards.length ?? 0;
+  if (target && idsToMove.has(overId)) {
+    return board;
+  }
+
+  const nextLanes = board.lanes.map((lane) => {
+    const beforeLength = lane.cards.length;
+    const cards = lane.cards.filter((card) => !idsToMove.has(card.id));
+    if (lane.id === destinationLaneId) {
+      const removedBeforeTarget = target
+        ? lane.cards.slice(0, target.index).filter((card) => idsToMove.has(card.id)).length
+        : 0;
+      insertIndex = Math.max(0, insertIndex - removedBeforeTarget);
+      cards.splice(insertIndex, 0, ...movingCards);
+    }
+    return beforeLength === cards.length ? lane : { ...lane, cards };
+  });
 
   return { ...board, lanes: nextLanes };
 }
@@ -703,31 +828,61 @@ function SortableLane({
   lane,
   attributeDefinitions,
   activeSort,
+  isCollapsed,
   onSortChange,
+  onToggleCollapsed,
   onAttributeChange,
   onOpenResource,
-  onCardContextMenu
+  onCardContextMenu,
+  selectedCardIds,
+  onCardClick,
+  onCardPointerDown
 }: {
   lane: KanbanLane;
   attributeDefinitions: Record<string, AttributeDefinition>;
   activeSort?: ActiveLaneSort;
+  isCollapsed: boolean;
   onSortChange: (laneId: string, sort: ActiveLaneSort | undefined) => void;
+  onToggleCollapsed: (laneId: string) => void;
   onAttributeChange: (cardId: string, key: string, value: string) => void;
   onOpenResource: KanbanBoardProps["onOpenResource"];
   onCardContextMenu: (cardId: string, event: React.MouseEvent<HTMLElement>) => void;
+  selectedCardIds: Set<string>;
+  onCardClick: (cardId: string, event: React.MouseEvent<HTMLElement>) => void;
+  onCardPointerDown: (cardId: string, event: React.PointerEvent<HTMLElement>) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: lane.id,
     data: { type: "lane" }
   });
+  const { setNodeRef: setCollapsedDropRef, isOver: isCollapsedOver } = useDroppable({ id: lane.id, data: { type: "lane-drop" } });
 
   const style = {
     transform: CSS.Transform.toString(transform),
     transition
   };
 
+  if (isCollapsed) {
+    return (
+      <section
+        className={`kanban-lane-pin${isCollapsedOver ? " is-over" : ""}${isDragging ? " is-dragging" : ""}`}
+        data-lane-id={lane.id}
+        ref={(node) => {
+          setNodeRef(node);
+          setCollapsedDropRef(node);
+        }}
+        style={style}
+      >
+        <button className="kanban-lane-pin__button" type="button" onClick={() => onToggleCollapsed(lane.id)}>
+          <span>{lane.title}</span>
+          <strong>{lane.cards.length}</strong>
+        </button>
+      </section>
+    );
+  }
+
   return (
-    <section className={`kanban-lane${isDragging ? " is-dragging" : ""}`} ref={setNodeRef} style={style}>
+    <section className={`kanban-lane${isDragging ? " is-dragging" : ""}`} data-lane-id={lane.id} ref={setNodeRef} style={style}>
       <div className="kanban-lane__header">
         <div className="kanban-lane__header-copy">
           <button className="kanban-handle" type="button" aria-label={`Drag lane ${lane.title}`} {...attributes} {...listeners}>
@@ -736,6 +891,14 @@ function SortableLane({
           <h4>{lane.title}</h4>
         </div>
         <div className="kanban-lane__actions">
+          <button
+            className="kanban-lane__collapse"
+            type="button"
+            onClick={() => onToggleCollapsed(lane.id)}
+            aria-label={`Collapse ${lane.title}`}
+          >
+            <ChevronsLeftRight size={14} />
+          </button>
           <select
             className="kanban-sort-select"
             aria-label={`Sort ${lane.title}`}
@@ -774,6 +937,9 @@ function SortableLane({
               onAttributeChange={onAttributeChange}
               onOpenResource={onOpenResource}
               onCardContextMenu={onCardContextMenu}
+              isSelected={selectedCardIds.has(card.id)}
+              onCardClick={onCardClick}
+              onCardPointerDown={onCardPointerDown}
             />
           ))}
         </LaneDropZone>
@@ -787,13 +953,19 @@ function SortableCard({
   attributeDefinitions,
   onAttributeChange,
   onOpenResource,
-  onCardContextMenu
+  onCardContextMenu,
+  isSelected,
+  onCardClick,
+  onCardPointerDown
 }: {
   card: KanbanCard;
   attributeDefinitions: Record<string, AttributeDefinition>;
   onAttributeChange: (cardId: string, key: string, value: string) => void;
   onOpenResource: KanbanBoardProps["onOpenResource"];
   onCardContextMenu: (cardId: string, event: React.MouseEvent<HTMLElement>) => void;
+  isSelected: boolean;
+  onCardClick: (cardId: string, event: React.MouseEvent<HTMLElement>) => void;
+  onCardPointerDown: (cardId: string, event: React.PointerEvent<HTMLElement>) => void;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: card.id,
@@ -809,16 +981,21 @@ function SortableCard({
 
   return (
     <article
-      className={`kanban-card${isDragging ? " is-dragging" : ""}`}
+      className={`kanban-card${isDragging ? " is-dragging" : ""}${isSelected ? " is-selected" : ""}`}
+      data-card-id={card.id}
       ref={setNodeRef}
       style={style}
+      {...attributes}
+      {...listeners}
       onContextMenu={(event) => onCardContextMenu(card.id, event)}
+      onClick={(event) => onCardClick(card.id, event)}
+      onPointerDown={(event) => onCardPointerDown(card.id, event)}
     >
       <div className="kanban-card__title-row">
         <div className="kanban-card__title-wrap">
-          <button className="kanban-handle kanban-handle--card" type="button" aria-label={`Drag card ${card.title}`} {...attributes} {...listeners}>
+          <span className="kanban-handle kanban-handle--card" aria-hidden="true">
             <GripVertical size={14} />
-          </button>
+          </span>
           <span className="kanban-card__title">{card.title}</span>
         </div>
 
@@ -827,6 +1004,7 @@ function SortableCard({
             className="kanban-open-button"
             type="button"
             onClick={() => onOpenResource(card.resource!.target, card.resource!.kind)}
+            onPointerDown={(event) => event.stopPropagation()}
             aria-label={card.resource.kind === "url" ? "Open repository" : "Open local folder"}
           >
             <ResourceIcon size={15} />
@@ -855,6 +1033,8 @@ function SortableCard({
                 {type === "select" || type === "multi" ? (
                   <select
                     value={attribute.value}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => event.stopPropagation()}
                     onChange={(event) => onAttributeChange(card.id, attribute.key, event.currentTarget.value)}
                   >
                     {definition?.options?.map((option) => (
@@ -869,6 +1049,8 @@ function SortableCard({
                     min={type === "percent" ? 0 : undefined}
                     max={type === "percent" ? 100 : undefined}
                     value={type === "percent" ? attribute.value.replace("%", "") : attribute.value}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => event.stopPropagation()}
                     onChange={(event) =>
                       onAttributeChange(
                         card.id,
@@ -935,9 +1117,13 @@ function CardOverlay({ card, attributeDefinitions }: { card: KanbanCard | null; 
 
 export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRunExtensionAction }: KanbanBoardProps) {
   const [laneSorts, setLaneSorts] = useState<Record<string, ActiveLaneSort>>(() => readStoredLaneSorts(note.path));
+  const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(() => readCollapsedLanes(note.path));
   const [board, setBoard] = useState<KanbanBoardModel>(() => applyActiveLaneSorts(parseKanbanNote(note), readStoredLaneSorts(note.path)));
   const [activeId, setActiveId] = useState<string | null>(null);
   const [dragSnapshot, setDragSnapshot] = useState<KanbanBoardModel | null>(null);
+  const [selectedCardIds, setSelectedCardIds] = useState<Set<string>>(new Set());
+  const [lastSelectedCardId, setLastSelectedCardId] = useState<string | null>(null);
+  const pendingPointerDrag = useRef<PendingPointerDrag | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -946,22 +1132,111 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
   const [codexMaxEdits, setCodexMaxEdits] = useState(3);
   const [codexOutput, setCodexOutput] = useState<string | null>(null);
   const [isRunningCodex, setIsRunningCodex] = useState(false);
+  const [showFocusTimer, setShowFocusTimer] = useState(false);
+  const [focusState, setFocusState] = useState<FocusTimerState | null>(null);
+  const [focusProject, setFocusProject] = useState("");
+  const [focusDuration, setFocusDuration] = useState(20);
+  const [focusRemaining, setFocusRemaining] = useState("");
+  const [isFocusBusy, setIsFocusBusy] = useState(false);
   const [cardContextMenu, setCardContextMenu] = useState<CardContextMenuState | null>(null);
   const [contextParentId, setContextParentId] = useState("");
   const [contextLaneId, setContextLaneId] = useState("");
+  const focusContribution = extensions.find((extension) => extension.pluginId === "project-focus-timer") ?? null;
 
   useEffect(() => {
     const storedSorts = readStoredLaneSorts(note.path);
+    const storedCollapsedLanes = readCollapsedLanes(note.path);
     const nextBoard = applyActiveLaneSorts(parseKanbanNote(note), storedSorts);
     setLaneSorts(storedSorts);
+    setCollapsedLanes(storedCollapsedLanes);
     setBoard(nextBoard);
+    setSelectedCardIds(new Set());
+    setLastSelectedCardId(null);
     setNotice(null);
     setActionError(null);
 
     const codexContribution = extensions.find((extension) => extension.pluginId === "codex-board-bar");
     const defaultMaxEdits = Number(codexContribution?.config?.defaultMaxEdits ?? 3);
     setCodexMaxEdits(defaultMaxEdits);
+
+    const focusContribution = extensions.find((extension) => extension.pluginId === "project-focus-timer");
+    const defaultDuration = Number(focusContribution?.config?.durationMinutes ?? 20);
+    setFocusDuration(defaultDuration);
   }, [extensions, note]);
+
+  useEffect(() => {
+    if (!focusContribution) {
+      setFocusState(null);
+      return;
+    }
+
+    const contribution = focusContribution;
+    let isActive = true;
+    async function loadFocusStatus() {
+      try {
+        const result = await onRunExtensionAction({
+          pluginId: contribution.pluginId,
+          actionId: "status"
+        });
+        if (isActive && result.ok && isFocusTimerState(result.data)) {
+          setFocusState(result.data);
+          setFocusDuration(result.data.durationMinutes);
+        }
+      } catch {
+        if (isActive) {
+          setFocusState(null);
+        }
+      }
+    }
+
+    void loadFocusStatus();
+    return () => {
+      isActive = false;
+    };
+  }, [focusContribution, onRunExtensionAction]);
+
+  useEffect(() => {
+    const update = () => {
+      setFocusRemaining(focusState?.current ? formatRemaining(focusState.current.endsAt) : "");
+    };
+    update();
+    const interval = window.setInterval(update, 1000);
+    return () => window.clearInterval(interval);
+  }, [focusState?.current]);
+
+  useEffect(() => {
+    function handlePointerUp(event: PointerEvent) {
+      const pending = pendingPointerDrag.current;
+      pendingPointerDrag.current = null;
+      if (!pending) {
+        return;
+      }
+
+      const distance = Math.hypot(event.clientX - pending.x, event.clientY - pending.y);
+      if (distance < 24) {
+        return;
+      }
+
+      const dropTargetId = dropTargetFromPoint(event.clientX, event.clientY);
+      if (!dropTargetId || dropTargetId === pending.cardId) {
+        return;
+      }
+
+      const nextBoard = applyActiveLaneSorts(
+        moveCardGroup(dragSnapshot ?? board, pending.cardId, selectedCardIds, dropTargetId),
+        laneSorts
+      );
+      if (serializeBoard(nextBoard) === serializeBoard(dragSnapshot ?? board)) {
+        return;
+      }
+
+      setBoard(nextBoard);
+      void persistBoard(nextBoard);
+    }
+
+    window.addEventListener("pointerup", handlePointerUp);
+    return () => window.removeEventListener("pointerup", handlePointerUp);
+  }, [board, dragSnapshot, laneSorts, selectedCardIds]);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -975,6 +1250,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
     [board]
   );
   const allCards = useMemo(() => board.lanes.flatMap((lane) => lane.cards), [board]);
+  const projectNames = useMemo(() => allCards.map((card) => card.linkTarget || card.title).filter(Boolean), [allCards]);
   const activeCard = activeId ? cardMap.get(activeId) ?? null : null;
   const contextCard = cardContextMenu ? cardMap.get(cardContextMenu.cardId) ?? null : null;
   const parentCandidates = allCards.filter((card) => card.id !== cardContextMenu?.cardId);
@@ -1030,6 +1306,61 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
     const nextBoard = applyActiveLaneSorts(board, nextSorts);
     setBoard(nextBoard);
     void persistBoard(nextBoard);
+  }
+
+  function handleToggleCollapsed(laneId: string) {
+    const next = new Set(collapsedLanes);
+    if (next.has(laneId)) {
+      next.delete(laneId);
+    } else {
+      next.add(laneId);
+    }
+    writeCollapsedLanes(note.path, next);
+    setCollapsedLanes(next);
+  }
+
+  function handleCardClick(cardId: string, event: React.MouseEvent<HTMLElement>) {
+    if (event.defaultPrevented) {
+      return;
+    }
+
+    if (event.shiftKey && lastSelectedCardId) {
+      const range = cardIdsBetween(board, lastSelectedCardId, cardId);
+      setSelectedCardIds((current) => new Set([...current, ...range]));
+      return;
+    }
+
+    if (event.metaKey || event.ctrlKey) {
+      setSelectedCardIds((current) => {
+        const next = new Set(current);
+        if (next.has(cardId)) {
+          next.delete(cardId);
+        } else {
+          next.add(cardId);
+        }
+        return next;
+      });
+      setLastSelectedCardId(cardId);
+      return;
+    }
+
+    setSelectedCardIds(new Set([cardId]));
+    setLastSelectedCardId(cardId);
+  }
+
+  function handleCardPointerDown(cardId: string, event: React.PointerEvent<HTMLElement>) {
+    if (event.button !== 0) {
+      return;
+    }
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest("button, input, select, textarea, a")) {
+      return;
+    }
+    pendingPointerDrag.current = {
+      cardId,
+      x: event.clientX,
+      y: event.clientY
+    };
   }
 
   function handleAttributeChange(cardId: string, key: string, value: string) {
@@ -1101,8 +1432,13 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
   }
 
   function handleDragStart(event: DragStartEvent) {
-    setActiveId(String(event.active.id));
+    const nextActiveId = String(event.active.id);
+    setActiveId(nextActiveId);
     setDragSnapshot(board);
+    if (cardMap.has(nextActiveId) && !selectedCardIds.has(nextActiveId)) {
+      setSelectedCardIds(new Set([nextActiveId]));
+      setLastSelectedCardId(nextActiveId);
+    }
   }
 
   function handleDragOver(event: DragOverEvent) {
@@ -1116,7 +1452,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
       return;
     }
 
-    setBoard((currentBoard) => moveCard(currentBoard, activeId, String(overId)));
+    setBoard((currentBoard) => moveCardGroup(currentBoard, activeId, selectedCardIds, String(overId)));
   }
 
   async function handleDragEnd(event: DragEndEvent) {
@@ -1129,6 +1465,19 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
     if (!overId) {
       if (dragSnapshot) {
         setBoard(dragSnapshot);
+      }
+      return;
+    }
+
+    if (cardMap.has(activeIdValue)) {
+      const sourceBoard = dragSnapshot ?? board;
+      const nextBoard = applyActiveLaneSorts(
+        moveCardGroup(sourceBoard, activeIdValue, selectedCardIds, overId),
+        laneSorts
+      );
+      if (serializeBoard(nextBoard) !== serializeBoard(sourceBoard)) {
+        setBoard(nextBoard);
+        await persistBoard(nextBoard);
       }
       return;
     }
@@ -1194,6 +1543,78 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
     }
   }
 
+  async function runFocusAction(actionId: string, payload?: Record<string, unknown>) {
+    if (!focusContribution) {
+      return;
+    }
+
+    setIsFocusBusy(true);
+    setActionError(null);
+
+    try {
+      const requestPayload = payload
+        ? {
+            pluginId: focusContribution.pluginId,
+            actionId,
+            payload
+          }
+        : {
+            pluginId: focusContribution.pluginId,
+            actionId
+          };
+      const result = await onRunExtensionAction({
+        ...requestPayload
+      });
+
+      if (!result.ok) {
+        setActionError(result.message);
+      } else {
+        setNotice(result.message);
+      }
+
+      if (isFocusTimerState(result.data)) {
+        setFocusState(result.data);
+        setFocusDuration(result.data.durationMinutes);
+      }
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "Failed to run focus timer action");
+    } finally {
+      setIsFocusBusy(false);
+    }
+  }
+
+  function focusPayload() {
+    return {
+      project: focusProject.trim(),
+      note: "",
+      durationMinutes: focusDuration
+    };
+  }
+
+  async function startFocusBlock() {
+    if (!focusProject.trim()) {
+      setActionError("Choose a project first.");
+      return;
+    }
+    await runFocusAction("start", focusPayload());
+  }
+
+  async function queueFocusBlock() {
+    if (!focusProject.trim()) {
+      setActionError("Choose a project first.");
+      return;
+    }
+    await runFocusAction("queue", focusPayload());
+  }
+
+  async function recordFocusBlock() {
+    if (!focusProject.trim()) {
+      setActionError("Choose a project first.");
+      return;
+    }
+    await runFocusAction("record", focusPayload());
+  }
+
   return (
     <section className="kanban-board">
       <div className="kanban-board__toolbar">
@@ -1208,6 +1629,12 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
         </div>
 
         <div className="kanban-board__toolbar-right">
+          {focusContribution ? (
+            <button className="kanban-toolbar-button" type="button" onClick={() => setShowFocusTimer((value) => !value)}>
+              <Timer size={14} />
+              <span>Focus</span>
+            </button>
+          ) : null}
           {codexContribution ? (
             <button className="kanban-toolbar-button" type="button" onClick={() => setShowCodexBar((value) => !value)}>
               <Sparkles size={14} />
@@ -1222,6 +1649,75 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
           ) : null}
         </div>
       </div>
+
+      {showFocusTimer && focusContribution ? (
+        <div className="kanban-focus-timer">
+          {focusState?.current ? (
+            <div className="kanban-focus-timer__active">
+              <div>
+                <strong>{focusState.current.project}</strong>
+                <span>{focusState.current.note || "Focus block"}</span>
+              </div>
+              <code>{focusRemaining}</code>
+              <button type="button" disabled={isFocusBusy} onClick={() => void runFocusAction("finish")}>
+                Finish
+              </button>
+              <button type="button" disabled={isFocusBusy} onClick={() => void runFocusAction("abandon")}>
+                Abandon
+              </button>
+            </div>
+          ) : (
+            <div className="kanban-focus-timer__form">
+              <input
+                className="kanban-focus-timer__project"
+                list="kanban-focus-projects"
+                placeholder="Project"
+                value={focusProject}
+                onChange={(event) => setFocusProject(event.currentTarget.value)}
+              />
+              <datalist id="kanban-focus-projects">
+                {projectNames.map((project) => (
+                  <option key={project} value={project} />
+                ))}
+              </datalist>
+              <input
+                className="kanban-focus-timer__duration"
+                type="number"
+                min={1}
+                step={1}
+                value={focusDuration}
+                onChange={(event) => setFocusDuration(Math.max(1, Number.parseInt(event.currentTarget.value || "20", 10) || 20))}
+              />
+              <button type="button" disabled={isFocusBusy} onClick={() => void startFocusBlock()}>
+                Start
+              </button>
+              <button type="button" disabled={isFocusBusy} onClick={() => void queueFocusBlock()}>
+                Queue
+              </button>
+              <button type="button" disabled={isFocusBusy} onClick={() => void recordFocusBlock()}>
+                Record
+              </button>
+            </div>
+          )}
+
+          {focusState?.queue.length ? (
+            <div className="kanban-focus-timer__queue">
+              {focusState.queue.map((item, index) => (
+                <div className="kanban-focus-timer__queue-row" key={`${item.project}-${index}`}>
+                  <span>{item.project}</span>
+                  <small>{item.note || `${item.durationMinutes}m`}</small>
+                  <button type="button" disabled={isFocusBusy || Boolean(focusState.current)} onClick={() => void runFocusAction("startQueued", { index })}>
+                    Start
+                  </button>
+                  <button type="button" disabled={isFocusBusy} onClick={() => void runFocusAction("removeQueued", { index })}>
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {showCodexBar && codexContribution ? (
         <div className="kanban-codex-bar">
@@ -1336,11 +1832,16 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
                 lane={lane}
                 attributeDefinitions={board.attributeDefinitions}
                 {...(laneSorts[lane.id] ? { activeSort: laneSorts[lane.id] } : {})}
-                  onSortChange={handleLaneSortChange}
-                  onAttributeChange={handleAttributeChange}
-                  onOpenResource={onOpenResource}
-                  onCardContextMenu={handleCardContextMenu}
-                />
+                isCollapsed={collapsedLanes.has(lane.id)}
+                onSortChange={handleLaneSortChange}
+                onToggleCollapsed={handleToggleCollapsed}
+                onAttributeChange={handleAttributeChange}
+                onOpenResource={onOpenResource}
+                onCardContextMenu={handleCardContextMenu}
+                selectedCardIds={selectedCardIds}
+                onCardClick={handleCardClick}
+                onCardPointerDown={handleCardPointerDown}
+              />
             ))}
           </div>
         </SortableContext>
