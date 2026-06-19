@@ -130,6 +130,7 @@ type BoardFilters = {
 type KanbanBoardProps = {
   note: NoteDetail;
   extensions: ExtensionContribution[];
+  projectNames: Record<string, string>;
   onPersist: (notePath: string, content: string) => Promise<NoteDetail>;
   onOpenResource: (target: string, kind: "url" | "path") => Promise<void>;
   onRunExtensionAction: (payload: {
@@ -470,24 +471,38 @@ function uniqueSorted(values: string[]) {
   return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
 }
 
-function cardSearchText(card: KanbanCard, laneTitle: string, visibility: RepoVisibility | null) {
+function displayProjectName(nameOrPath: string | null | undefined, projectNames: Record<string, string>) {
+  if (!nameOrPath) {
+    return "";
+  }
+  const text = String(nameOrPath).trim();
+  const base = text.includes("/") ? text.split("/").filter(Boolean).at(-1) ?? text : text;
+  return projectNames[text] ?? projectNames[base] ?? base ?? text;
+}
+
+function cardDisplayTitle(card: KanbanCard, projectNames: Record<string, string>) {
+  return displayProjectName(card.linkTarget || card.title, projectNames) || card.title;
+}
+
+function cardSearchText(card: KanbanCard, laneTitle: string, visibility: RepoVisibility | null, projectNames: Record<string, string>) {
   return [
     laneTitle,
+    cardDisplayTitle(card, projectNames),
     card.title,
     card.linkTarget,
     card.resource?.target ?? "",
     visibility ?? "",
     ...card.tags,
     ...card.attributes.flatMap((attribute) => [attribute.key, attribute.value]),
-    ...card.children.flatMap((child) => [child.title, child.linkTarget])
+    ...card.children.flatMap((child) => [displayProjectName(child.linkTarget || child.title, projectNames), child.title, child.linkTarget])
   ]
     .join(" ")
     .toLowerCase();
 }
 
-function cardMatchesFilters(card: KanbanCard, laneTitle: string, filters: BoardFilters, visibility: RepoVisibility | null) {
+function cardMatchesFilters(card: KanbanCard, laneTitle: string, filters: BoardFilters, visibility: RepoVisibility | null, projectNames: Record<string, string>) {
   const query = filters.query.trim().toLowerCase();
-  if (query && !cardSearchText(card, laneTitle, visibility).includes(query)) {
+  if (query && !cardSearchText(card, laneTitle, visibility, projectNames).includes(query)) {
     return false;
   }
   if (filters.lane && filters.lane !== laneTitle) {
@@ -502,12 +517,12 @@ function cardMatchesFilters(card: KanbanCard, laneTitle: string, filters: BoardF
   return Object.entries(filters.attributes).every(([key, value]) => !value || attributeValue(card, key) === value);
 }
 
-function filterBoard(board: KanbanBoardModel, filters: BoardFilters, repoVisibility: Record<string, RepoVisibility>) {
+function filterBoard(board: KanbanBoardModel, filters: BoardFilters, repoVisibility: Record<string, RepoVisibility>, projectNames: Record<string, string>) {
   return {
     ...board,
     lanes: board.lanes.map((lane) => ({
       ...lane,
-      cards: lane.cards.filter((card) => cardMatchesFilters(card, lane.title, filters, repoVisibilityForCard(card, repoVisibility)))
+      cards: lane.cards.filter((card) => cardMatchesFilters(card, lane.title, filters, repoVisibilityForCard(card, repoVisibility), projectNames))
     }))
   };
 }
@@ -990,6 +1005,7 @@ function LaneDropZone({ laneId, children }: { laneId: string; children: React.Re
 function SortableLane({
   lane,
   attributeDefinitions,
+  projectNames,
   activeSort,
   isCollapsed,
   onSortChange,
@@ -1004,6 +1020,7 @@ function SortableLane({
 }: {
   lane: KanbanLane;
   attributeDefinitions: Record<string, AttributeDefinition>;
+  projectNames: Record<string, string>;
   activeSort?: ActiveLaneSort;
   isCollapsed: boolean;
   onSortChange: (laneId: string, sort: ActiveLaneSort | undefined) => void;
@@ -1100,6 +1117,7 @@ function SortableLane({
               key={card.id}
               card={card}
               attributeDefinitions={attributeDefinitions}
+              projectNames={projectNames}
               onAttributeChange={onAttributeChange}
               onOpenResource={onOpenResource}
               onCardContextMenu={onCardContextMenu}
@@ -1118,6 +1136,7 @@ function SortableLane({
 function SortableCard({
   card,
   attributeDefinitions,
+  projectNames,
   onAttributeChange,
   onOpenResource,
   onCardContextMenu,
@@ -1128,6 +1147,7 @@ function SortableCard({
 }: {
   card: KanbanCard;
   attributeDefinitions: Record<string, AttributeDefinition>;
+  projectNames: Record<string, string>;
   onAttributeChange: (cardId: string, key: string, value: string) => void;
   onOpenResource: KanbanBoardProps["onOpenResource"];
   onCardContextMenu: (cardId: string, event: React.MouseEvent<HTMLElement>) => void;
@@ -1148,6 +1168,7 @@ function SortableCard({
 
   const ResourceIcon = card.resource?.kind === "url" && card.resource.isGithub ? GitBranch : FolderOpen;
   const VisibilityIcon = visibility === "public" ? Globe2 : Lock;
+  const displayTitle = cardDisplayTitle(card, projectNames);
   const {
     onPointerDown: sortablePointerDown,
     ...sortableListeners
@@ -1180,7 +1201,7 @@ function SortableCard({
           <span className="kanban-handle kanban-handle--card" aria-hidden="true">
             <GripVertical size={14} />
           </span>
-          <span className="kanban-card__title">{card.title}</span>
+          <span className="kanban-card__title" title={displayTitle === card.title ? undefined : card.title}>{displayTitle}</span>
         </div>
 
         {card.resource ? (
@@ -1277,7 +1298,15 @@ function SortableCard({
   );
 }
 
-function CardOverlay({ card, attributeDefinitions }: { card: KanbanCard | null; attributeDefinitions: Record<string, AttributeDefinition> }) {
+function CardOverlay({
+  card,
+  attributeDefinitions,
+  projectNames
+}: {
+  card: KanbanCard | null;
+  attributeDefinitions: Record<string, AttributeDefinition>;
+  projectNames: Record<string, string>;
+}) {
   if (!card) {
     return null;
   }
@@ -1287,7 +1316,7 @@ function CardOverlay({ card, attributeDefinitions }: { card: KanbanCard | null; 
       <div className="kanban-card__title-row">
         <div className="kanban-card__title-wrap">
           <GripVertical size={14} />
-          <span className="kanban-card__title">{card.title}</span>
+          <span className="kanban-card__title">{cardDisplayTitle(card, projectNames)}</span>
         </div>
       </div>
 
@@ -1315,7 +1344,7 @@ function CardOverlay({ card, attributeDefinitions }: { card: KanbanCard | null; 
   );
 }
 
-export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRunExtensionAction }: KanbanBoardProps) {
+export function KanbanBoard({ note, extensions, projectNames, onPersist, onOpenResource, onRunExtensionAction }: KanbanBoardProps) {
   const [laneSorts, setLaneSorts] = useState<Record<string, ActiveLaneSort>>(() => readStoredLaneSorts(note.path));
   const [collapsedLanes, setCollapsedLanes] = useState<Set<string>>(() => readCollapsedLanes(note.path));
   const [board, setBoard] = useState<KanbanBoardModel>(() => applyActiveLaneSorts(parseKanbanNote(note), readStoredLaneSorts(note.path)));
@@ -1453,7 +1482,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
     [board]
   );
   const allCards = useMemo(() => board.lanes.flatMap((lane) => lane.cards), [board]);
-  const visibleBoard = useMemo(() => filterBoard(board, filters, repoVisibility), [board, filters, repoVisibility]);
+  const visibleBoard = useMemo(() => filterBoard(board, filters, repoVisibility, projectNames), [board, filters, projectNames, repoVisibility]);
   const visibleCardCount = useMemo(() => visibleBoard.lanes.reduce((count, lane) => count + lane.cards.length, 0), [visibleBoard]);
   const totalCardCount = allCards.length;
   const laneFilterOptions = useMemo(() => board.lanes.map((lane) => lane.title), [board]);
@@ -1483,7 +1512,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
       filters.visibility ||
       Object.values(filters.attributes).some(Boolean)
   );
-  const projectNames = useMemo(() => allCards.map((card) => card.linkTarget || card.title).filter(Boolean), [allCards]);
+  const focusProjectNames = useMemo(() => uniqueSorted(allCards.map((card) => cardDisplayTitle(card, projectNames)).filter(Boolean)), [allCards, projectNames]);
   const activeCard = activeId ? cardMap.get(activeId) ?? null : null;
   const contextCard = cardContextMenu ? cardMap.get(cardContextMenu.cardId) ?? null : null;
   const contextCardIds = useMemo(() => {
@@ -2040,7 +2069,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
                 onChange={(event) => setFocusProject(event.currentTarget.value)}
               />
               <datalist id="kanban-focus-projects">
-                {projectNames.map((project) => (
+                {focusProjectNames.map((project) => (
                   <option key={project} value={project} />
                 ))}
               </datalist>
@@ -2124,7 +2153,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
           onClick={(event) => event.stopPropagation()}
         >
           <div className="kanban-context-menu__title">
-            {hasMultiContext ? `${contextCards.length} selected cards` : contextCard.title}
+            {hasMultiContext ? `${contextCards.length} selected cards` : cardDisplayTitle(contextCard, projectNames)}
           </div>
           <div className="kanban-context-menu__items">
             <button type="button" disabled={hasMultiContext} onClick={handleEditContextCard}>Edit card</button>
@@ -2147,7 +2176,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
               <option value="">Choose project</option>
               {parentCandidates.map((card) => (
                 <option value={card.id} key={card.id}>
-                  {card.title}
+                  {cardDisplayTitle(card, projectNames)}
                 </option>
             ))}
           </select>
@@ -2197,6 +2226,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
                 key={lane.id}
                 lane={lane}
                 attributeDefinitions={board.attributeDefinitions}
+                projectNames={projectNames}
                 {...(laneSorts[lane.id] ? { activeSort: laneSorts[lane.id] } : {})}
                 isCollapsed={collapsedLanes.has(lane.id)}
                 onSortChange={handleLaneSortChange}
@@ -2213,7 +2243,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
           </div>
         </SortableContext>
 
-        <DragOverlay>{activeCard ? <CardOverlay card={activeCard} attributeDefinitions={board.attributeDefinitions} /> : null}</DragOverlay>
+        <DragOverlay>{activeCard ? <CardOverlay card={activeCard} attributeDefinitions={board.attributeDefinitions} projectNames={projectNames} /> : null}</DragOverlay>
       </DndContext>
     </section>
   );

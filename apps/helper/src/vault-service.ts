@@ -15,6 +15,7 @@ import { classifyPluginManifest } from "./plugin-host.js";
 const MARKDOWN_EXTENSION = ".md";
 const OBSIDIAN_FOLDER = ".obsidian";
 const PLUGIN_FOLDER = "plugins";
+const DAILY_WORK_REPORT_PROJECT_NAMES = path.join("daily-work-report", "config", "project_names.json");
 
 function expandHome(inputPath: string): string {
   if (inputPath === "~") {
@@ -35,6 +36,29 @@ async function pathExists(candidatePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function loadProjectNames(vaultPath: string): Promise<Record<string, string>> {
+  const candidates = [
+    path.join(path.dirname(vaultPath), DAILY_WORK_REPORT_PROJECT_NAMES),
+    path.join(path.dirname(path.dirname(vaultPath)), DAILY_WORK_REPORT_PROJECT_NAMES),
+    path.join(os.homedir(), "Code", DAILY_WORK_REPORT_PROJECT_NAMES)
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(await readFile(candidate, "utf8")) as Record<string, unknown>;
+      return Object.fromEntries(
+        Object.entries(parsed)
+          .map(([key, value]) => [String(key).trim(), String(value).trim()] as const)
+          .filter(([key, value]) => key && value)
+      );
+    } catch {
+      // daily-work-report is optional for generic vaults.
+    }
+  }
+
+  return {};
 }
 
 async function isVaultDirectory(candidatePath: string): Promise<boolean> {
@@ -286,6 +310,7 @@ export async function getVaultDetail(vaultId: string): Promise<VaultDetail | nul
     id,
     name: path.basename(vaultPath),
     path: vaultPath,
+    projectNames: await loadProjectNames(vaultPath),
     notes: (await Promise.all(markdownFiles.map((filePath) => buildNoteSummary(vaultPath, filePath)))).sort((left, right) =>
       left.path.localeCompare(right.path)
     ),

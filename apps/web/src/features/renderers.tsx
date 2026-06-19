@@ -5,6 +5,7 @@ import { KanbanBoard } from "./kanban";
 
 export type NoteRendererContext = {
   extensions: ExtensionContribution[];
+  projectNames: Record<string, string>;
   onPersist: (notePath: string, content: string) => Promise<NoteDetail>;
   onOpenResource: (target: string, kind: "url" | "path") => Promise<void>;
   onRunExtensionAction: (payload: {

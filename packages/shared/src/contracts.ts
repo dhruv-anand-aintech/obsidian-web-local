@@ -53,6 +53,7 @@ export interface VaultDetail {
   id: string;
   name: string;
   path: string;
+  projectNames: Record<string, string>;
   notes: NoteSummary[];
   pluginManifests: PluginManifestSummary[];
   extensionContributions: ExtensionContribution[];
