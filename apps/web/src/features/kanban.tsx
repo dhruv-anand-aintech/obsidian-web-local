@@ -23,7 +23,7 @@ import {
   verticalListSortingStrategy
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { ChevronsLeftRight, FolderOpen, GitBranch, GripVertical, LoaderCircle, Sparkles, Timer } from "lucide-react";
+import { FolderOpen, GitBranch, GripVertical, LoaderCircle, PanelLeftClose, PanelLeftOpen, Sparkles, Timer } from "lucide-react";
 import { parse as parseYaml } from "yaml";
 import type { ExtensionActionResponse, ExtensionContribution, NoteDetail } from "@obsidian-web-local/shared";
 
@@ -873,7 +873,8 @@ function SortableLane({
         }}
         style={style}
       >
-        <button className="kanban-lane-pin__button" type="button" onClick={() => onToggleCollapsed(lane.id)}>
+        <button className="kanban-lane-pin__button" type="button" onClick={() => onToggleCollapsed(lane.id)} aria-label={`Expand ${lane.title}`}>
+          <PanelLeftOpen size={14} />
           <span>{lane.title}</span>
           <strong>{lane.cards.length}</strong>
         </button>
@@ -897,7 +898,7 @@ function SortableLane({
             onClick={() => onToggleCollapsed(lane.id)}
             aria-label={`Collapse ${lane.title}`}
           >
-            <ChevronsLeftRight size={14} />
+            <PanelLeftClose size={14} />
           </button>
           <select
             className="kanban-sort-select"
