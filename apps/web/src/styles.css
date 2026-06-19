@@ -917,10 +917,74 @@ code {
 .markdown-note__content {
   margin: 0;
   overflow: auto;
-  padding: 16px;
+  padding: 18px 20px;
   border: 1px solid rgba(242, 238, 232, 0.08);
   background: rgba(11, 14, 19, 0.7);
-  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
+.markdown-note__content > :first-child {
+  margin-top: 0;
+}
+
+.markdown-note__content > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-note__content h1,
+.markdown-note__content h2,
+.markdown-note__content h3 {
+  margin: 1.1em 0 0.45em;
+  color: #f5f1ea;
+}
+
+.markdown-note__content h1 {
+  font-size: 1.75rem;
+}
+
+.markdown-note__content h2 {
+  font-size: 1.35rem;
+}
+
+.markdown-note__content h3 {
+  font-size: 1.1rem;
+}
+
+.markdown-note__content ul,
+.markdown-note__content ol {
+  padding-left: 1.35rem;
+}
+
+.markdown-note__content li {
+  margin: 0.35rem 0;
+}
+
+.markdown-note__content code {
+  padding: 0.1rem 0.28rem;
+  border-radius: 4px;
+  background: rgba(242, 238, 232, 0.1);
+  color: #f2eee8;
+}
+
+.markdown-note__content pre {
+  overflow: auto;
+  padding: 12px;
+  border-radius: 6px;
+  background: rgba(2, 6, 12, 0.72);
+}
+
+.markdown-note__content pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.markdown-note__content a {
+  color: #b996ff;
+  text-decoration: none;
+}
+
+.markdown-note__content a:hover {
+  text-decoration: underline;
 }
 
 .plugin-status {

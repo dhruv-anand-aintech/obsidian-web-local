@@ -1,4 +1,5 @@
 import type { JSX } from "react";
+import ReactMarkdown from "react-markdown";
 import type { ExtensionActionResponse, ExtensionContribution, NoteDetail } from "@obsidian-web-local/shared";
 import { KanbanBoard } from "./kanban";
 
@@ -21,6 +22,8 @@ export type NoteRenderer = {
 };
 
 function MarkdownNote({ note }: { note: NoteDetail }) {
+  const renderedContent = note.content.replace(/^\s*<!--\s*focus-session\s+.*?-->\s*$/gm, "");
+
   return (
     <section className="markdown-note">
       <div className="kanban-board__header">
@@ -30,7 +33,21 @@ function MarkdownNote({ note }: { note: NoteDetail }) {
         </div>
         <span className="badge">{note.viewTypes.join(", ")}</span>
       </div>
-      <pre className="markdown-note__content">{note.content}</pre>
+      <div className="markdown-note__content">
+        <ReactMarkdown
+          components={{
+            a({ children, href, ...props }) {
+              return (
+                <a href={href} rel="noreferrer" target="_blank" {...props}>
+                  {children}
+                </a>
+              );
+            }
+          }}
+        >
+          {renderedContent}
+        </ReactMarkdown>
+      </div>
     </section>
   );
 }
