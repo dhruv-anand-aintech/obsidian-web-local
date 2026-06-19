@@ -978,6 +978,20 @@ function SortableCard({
   };
 
   const ResourceIcon = card.resource?.kind === "url" && card.resource.isGithub ? GitBranch : FolderOpen;
+  const {
+    onPointerDown: sortablePointerDown,
+    ...sortableListeners
+  } = listeners as typeof listeners & {
+    onPointerDown?: React.PointerEventHandler<HTMLElement>;
+  };
+
+  function handlePointerDown(event: React.PointerEvent<HTMLElement>) {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target?.closest("button, input, select, textarea, a")) {
+      onCardPointerDown(card.id, event);
+      sortablePointerDown?.(event);
+    }
+  }
 
   return (
     <article
@@ -986,10 +1000,10 @@ function SortableCard({
       ref={setNodeRef}
       style={style}
       {...attributes}
-      {...listeners}
+      {...sortableListeners}
       onContextMenu={(event) => onCardContextMenu(card.id, event)}
       onClick={(event) => onCardClick(card.id, event)}
-      onPointerDown={(event) => onCardPointerDown(card.id, event)}
+      onPointerDown={handlePointerDown}
     >
       <div className="kanban-card__title-row">
         <div className="kanban-card__title-wrap">
@@ -1003,7 +1017,10 @@ function SortableCard({
           <button
             className="kanban-open-button"
             type="button"
-            onClick={() => onOpenResource(card.resource!.target, card.resource!.kind)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenResource(card.resource!.target, card.resource!.kind);
+            }}
             onPointerDown={(event) => event.stopPropagation()}
             aria-label={card.resource.kind === "url" ? "Open repository" : "Open local folder"}
           >
@@ -1234,8 +1251,8 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
       void persistBoard(nextBoard);
     }
 
-    window.addEventListener("pointerup", handlePointerUp);
-    return () => window.removeEventListener("pointerup", handlePointerUp);
+    window.addEventListener("pointerup", handlePointerUp, { capture: true });
+    return () => window.removeEventListener("pointerup", handlePointerUp, { capture: true });
   }, [board, dragSnapshot, laneSorts, selectedCardIds]);
 
   const sensors = useSensors(
