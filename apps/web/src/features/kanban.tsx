@@ -111,6 +111,12 @@ type CardContextMenuState = {
   y: number;
 };
 
+type LaneContextMenuState = {
+  laneId: string;
+  x: number;
+  y: number;
+};
+
 type PendingPointerDrag = {
   cardId: string;
   x: number;
@@ -709,6 +715,76 @@ function moveCardGroup(board: KanbanBoardModel, activeId: string, selectedIds: S
   return { ...board, lanes: nextLanes };
 }
 
+function uniqueLaneTitle(board: KanbanBoardModel, baseTitle: string) {
+  const existingTitles = new Set(board.lanes.map((lane) => lane.title));
+  if (!existingTitles.has(baseTitle)) {
+    return baseTitle;
+  }
+  let index = 2;
+  let title = `${baseTitle} ${index}`;
+  while (existingTitles.has(title)) {
+    index += 1;
+    title = `${baseTitle} ${index}`;
+  }
+  return title;
+}
+
+function addLane(board: KanbanBoardModel, title: string) {
+  const laneTitle = uniqueLaneTitle(board, title.trim() || "New lane");
+  return {
+    ...board,
+    lanes: [
+      ...board.lanes,
+      {
+        id: `lane-${slugify(laneTitle)}`,
+        title: laneTitle,
+        cards: []
+      }
+    ]
+  };
+}
+
+function renameLane(board: KanbanBoardModel, laneId: string, title: string) {
+  const trimmed = title.trim();
+  if (!trimmed) {
+    return board;
+  }
+  const currentLane = board.lanes.find((lane) => lane.id === laneId);
+  if (!currentLane || currentLane.title === trimmed) {
+    return board;
+  }
+  const laneTitle = uniqueLaneTitle(
+    { ...board, lanes: board.lanes.filter((lane) => lane.id !== laneId) },
+    trimmed
+  );
+  return {
+    ...board,
+    lanes: board.lanes.map((lane) => lane.id === laneId ? { ...lane, id: `lane-${slugify(laneTitle)}`, title: laneTitle } : lane)
+  };
+}
+
+function deleteLane(board: KanbanBoardModel, laneId: string) {
+  return {
+    ...board,
+    lanes: board.lanes.filter((lane) => lane.id !== laneId)
+  };
+}
+
+function moveLaneByOffset(board: KanbanBoardModel, laneId: string, offset: number) {
+  const currentIndex = board.lanes.findIndex((lane) => lane.id === laneId);
+  if (currentIndex === -1) {
+    return board;
+  }
+  const nextIndex = Math.max(0, Math.min(board.lanes.length - 1, currentIndex + offset));
+  if (nextIndex === currentIndex) {
+    return board;
+  }
+  return {
+    ...board,
+    lanes: arrayMove(board.lanes, currentIndex, nextIndex)
+  };
+}
+
 function createUntitledCard(board: KanbanBoardModel): KanbanCard {
   const existingTitles = new Set(board.lanes.flatMap((lane) => lane.cards.map((card) => card.title)));
   let index = 1;
@@ -991,6 +1067,7 @@ function SortableLane({
   isCollapsed,
   onSortChange,
   onToggleCollapsed,
+  onLaneContextMenu,
   onAttributeChange,
   onOpenResource,
   onCardContextMenu,
@@ -1006,6 +1083,7 @@ function SortableLane({
   isCollapsed: boolean;
   onSortChange: (laneId: string, sort: ActiveLaneSort | undefined) => void;
   onToggleCollapsed: (laneId: string) => void;
+  onLaneContextMenu: (laneId: string, event: React.MouseEvent<HTMLElement>) => void;
   onAttributeChange: (cardId: string, key: string, value: string) => void;
   onOpenResource: KanbanBoardProps["onOpenResource"];
   onCardContextMenu: (cardId: string, event: React.MouseEvent<HTMLElement>) => void;
@@ -1035,6 +1113,7 @@ function SortableLane({
           setCollapsedDropRef(node);
         }}
         style={style}
+        onContextMenu={(event) => onLaneContextMenu(lane.id, event)}
       >
         <button className="kanban-lane-pin__button" type="button" onClick={() => onToggleCollapsed(lane.id)} aria-label={`Expand ${lane.title}`}>
           <PanelLeftOpen size={14} />
@@ -1046,7 +1125,13 @@ function SortableLane({
   }
 
   return (
-    <section className={`kanban-lane${isDragging ? " is-dragging" : ""}`} data-lane-id={lane.id} ref={setNodeRef} style={style}>
+    <section
+      className={`kanban-lane${isDragging ? " is-dragging" : ""}`}
+      data-lane-id={lane.id}
+      ref={setNodeRef}
+      style={style}
+      onContextMenu={(event) => onLaneContextMenu(lane.id, event)}
+    >
       <div className="kanban-lane__header">
         <div className="kanban-lane__header-copy">
           <button className="kanban-handle" type="button" aria-label={`Drag lane ${lane.title}`} {...attributes} {...listeners}>
@@ -1360,6 +1445,7 @@ export function KanbanBoard({
   const [isRefreshingRepos, setIsRefreshingRepos] = useState(false);
   const [filters, setFilters] = useState<BoardFilters>({ query: "", lane: "", tag: "", visibility: "", attributes: {} });
   const [cardContextMenu, setCardContextMenu] = useState<CardContextMenuState | null>(null);
+  const [laneContextMenu, setLaneContextMenu] = useState<LaneContextMenuState | null>(null);
   const [contextParentId, setContextParentId] = useState("");
   const [contextLaneId, setContextLaneId] = useState("");
   const focusContribution = extensions.find((extension) => extension.pluginId === "project-focus-timer") ?? null;
@@ -1514,23 +1600,27 @@ export function KanbanBoard({
   }, [board, cardContextMenu, selectedCardIds]);
   const contextCards = contextCardIds.map((cardId) => cardMap.get(cardId)).filter((card): card is KanbanCard => Boolean(card));
   const hasMultiContext = contextCards.length > 1;
+  const contextLane = laneContextMenu ? board.lanes.find((lane) => lane.id === laneContextMenu.laneId) ?? null : null;
   const parentCandidates = allCards.filter((card) => !contextCardIds.includes(card.id));
   const codexContribution = extensions.find((extension) => extension.pluginId === "codex-board-bar") ?? null;
   const activeAutomations = extensions.filter((extension) => extension.kind === "automation" && extension.enabled);
 
   useEffect(() => {
-    if (!cardContextMenu) {
+    if (!cardContextMenu && !laneContextMenu) {
       return;
     }
 
-    const closeMenu = () => setCardContextMenu(null);
+    const closeMenu = () => {
+      setCardContextMenu(null);
+      setLaneContextMenu(null);
+    };
     window.addEventListener("click", closeMenu);
     window.addEventListener("keydown", closeMenu);
     return () => {
       window.removeEventListener("click", closeMenu);
       window.removeEventListener("keydown", closeMenu);
     };
-  }, [cardContextMenu]);
+  }, [cardContextMenu, laneContextMenu]);
 
   async function persistBoard(nextBoard: KanbanBoardModel) {
     const nextContent = serializeBoard(nextBoard);
@@ -1578,6 +1668,66 @@ export function KanbanBoard({
     }
     writeCollapsedLanes(note.path, next);
     setCollapsedLanes(next);
+  }
+
+  function handleAddLane() {
+    const title = window.prompt("New lane name", "New lane");
+    if (title === null) {
+      return;
+    }
+    const nextBoard = addLane(board, title);
+    setBoard(nextBoard);
+    void persistBoard(nextBoard);
+  }
+
+  function handleLaneContextMenu(laneId: string, event: React.MouseEvent<HTMLElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    setCardContextMenu(null);
+    setLaneContextMenu({
+      laneId,
+      x: Math.min(event.clientX, window.innerWidth - 280),
+      y: Math.min(event.clientY, window.innerHeight - 180)
+    });
+  }
+
+  function handleRenameContextLane() {
+    if (!contextLane) {
+      return;
+    }
+    const title = window.prompt("Rename lane", contextLane.title);
+    if (title === null) {
+      return;
+    }
+    persistContextBoard(renameLane(board, contextLane.id, title));
+  }
+
+  function handleDeleteContextLane() {
+    if (!contextLane) {
+      return;
+    }
+    const confirmed = window.confirm(
+      `Delete lane "${contextLane.title}" and ${contextLane.cards.length} card${contextLane.cards.length === 1 ? "" : "s"}? This cannot be undone.`
+    );
+    if (!confirmed) {
+      return;
+    }
+    persistContextBoard(deleteLane(board, contextLane.id));
+  }
+
+  function handleHideContextLane() {
+    if (!contextLane) {
+      return;
+    }
+    setLaneContextMenu(null);
+    handleToggleCollapsed(contextLane.id);
+  }
+
+  function handleMoveContextLane(offset: number) {
+    if (!contextLane) {
+      return;
+    }
+    persistContextBoard(moveLaneByOffset(board, contextLane.id, offset));
   }
 
   function handleCardClick(cardId: string, event: React.MouseEvent<HTMLElement>) {
@@ -1660,6 +1810,7 @@ export function KanbanBoard({
 
   function persistContextBoard(nextBoard: KanbanBoardModel) {
     setCardContextMenu(null);
+    setLaneContextMenu(null);
     setContextParentId("");
     setContextLaneId("");
     setBoard(nextBoard);
@@ -1911,6 +2062,9 @@ export function KanbanBoard({
         </div>
 
         <div className="kanban-board__toolbar-right">
+          <button className="kanban-toolbar-button" type="button" onClick={handleAddLane}>
+            <span>Add lane</span>
+          </button>
           {focusContribution ? (
             <button className="kanban-toolbar-button" type="button" onClick={() => setShowFocusTimer((value) => !value)}>
               <Timer size={14} />
@@ -2191,6 +2345,36 @@ export function KanbanBoard({
         </div>
       ) : null}
 
+      {laneContextMenu && contextLane ? (
+        <div
+          className="kanban-context-menu"
+          style={{ left: laneContextMenu.x, top: laneContextMenu.y }}
+          role="menu"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="kanban-context-menu__title">{contextLane.title}</div>
+          <div className="kanban-context-menu__items">
+            <button type="button" onClick={handleRenameContextLane}>Rename lane</button>
+            <button type="button" onClick={handleHideContextLane}>Hide lane</button>
+            <button
+              type="button"
+              disabled={board.lanes.findIndex((lane) => lane.id === contextLane.id) <= 0}
+              onClick={() => handleMoveContextLane(-1)}
+            >
+              Move left
+            </button>
+            <button
+              type="button"
+              disabled={board.lanes.findIndex((lane) => lane.id === contextLane.id) >= board.lanes.length - 1}
+              onClick={() => handleMoveContextLane(1)}
+            >
+              Move right
+            </button>
+            <button type="button" onClick={handleDeleteContextLane}>Delete lane</button>
+          </div>
+        </div>
+      ) : null}
+
       <DndContext
         sensors={sensors}
         collisionDetection={kanbanCollisionDetection}
@@ -2211,6 +2395,7 @@ export function KanbanBoard({
                 isCollapsed={collapsedLanes.has(lane.id)}
                 onSortChange={handleLaneSortChange}
                 onToggleCollapsed={handleToggleCollapsed}
+                onLaneContextMenu={handleLaneContextMenu}
                 onAttributeChange={handleAttributeChange}
                 onOpenResource={onOpenResource}
                 onCardContextMenu={handleCardContextMenu}
