@@ -789,6 +789,10 @@ function duplicateCard(board: KanbanBoardModel, cardId: string) {
   };
 }
 
+function duplicateCards(board: KanbanBoardModel, cardIds: string[]) {
+  return cardIds.reduce((currentBoard, cardId) => duplicateCard(currentBoard, cardId), board);
+}
+
 function insertCardRelative(board: KanbanBoardModel, cardId: string, position: "before" | "after") {
   const source = findCardLocation(board, cardId);
   if (!source) {
@@ -835,12 +839,45 @@ function moveCardToEdge(board: KanbanBoardModel, cardId: string, edge: "top" | "
   };
 }
 
+function moveCardsToEdge(board: KanbanBoardModel, cardIds: string[], edge: "top" | "bottom") {
+  const ids = new Set(cardIds);
+  if (!ids.size) {
+    return board;
+  }
+
+  return {
+    ...board,
+    lanes: board.lanes.map((lane) => {
+      const movingCards = lane.cards.filter((card) => ids.has(card.id));
+      if (!movingCards.length) {
+        return lane;
+      }
+      const remainingCards = lane.cards.filter((card) => !ids.has(card.id));
+      return {
+        ...lane,
+        cards: edge === "top" ? [...movingCards, ...remainingCards] : [...remainingCards, ...movingCards]
+      };
+    })
+  };
+}
+
 function deleteCard(board: KanbanBoardModel, cardId: string) {
   return {
     ...board,
     lanes: board.lanes.map((lane) => ({
       ...lane,
       cards: lane.cards.filter((card) => card.id !== cardId)
+    }))
+  };
+}
+
+function deleteCards(board: KanbanBoardModel, cardIds: string[]) {
+  const ids = new Set(cardIds);
+  return {
+    ...board,
+    lanes: board.lanes.map((lane) => ({
+      ...lane,
+      cards: lane.cards.filter((card) => !ids.has(card.id))
     }))
   };
 }
@@ -867,6 +904,29 @@ function moveCardToLane(board: KanbanBoardModel, cardId: string, laneId: string)
         return { ...lane, cards: [movedCard, ...lane.cards] };
       }
       return lane;
+    })
+  };
+}
+
+function moveCardsToLane(board: KanbanBoardModel, cardIds: string[], laneId: string) {
+  const ids = new Set(cardIds);
+  if (!ids.size) {
+    return board;
+  }
+
+  const movingCards = orderedSelectedCards(board, ids);
+  if (!movingCards.length) {
+    return board;
+  }
+
+  return {
+    ...board,
+    lanes: board.lanes.map((lane) => {
+      const remainingCards = lane.cards.filter((card) => !ids.has(card.id));
+      if (lane.id === laneId) {
+        return { ...lane, cards: [...movingCards, ...remainingCards] };
+      }
+      return { ...lane, cards: remainingCards };
     })
   };
 }
@@ -1426,7 +1486,15 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
   const projectNames = useMemo(() => allCards.map((card) => card.linkTarget || card.title).filter(Boolean), [allCards]);
   const activeCard = activeId ? cardMap.get(activeId) ?? null : null;
   const contextCard = cardContextMenu ? cardMap.get(cardContextMenu.cardId) ?? null : null;
-  const parentCandidates = allCards.filter((card) => card.id !== cardContextMenu?.cardId);
+  const contextCardIds = useMemo(() => {
+    if (!cardContextMenu) {
+      return [];
+    }
+    return selectedCardIds.has(cardContextMenu.cardId) ? orderedSelectedCards(board, selectedCardIds).map((card) => card.id) : [cardContextMenu.cardId];
+  }, [board, cardContextMenu, selectedCardIds]);
+  const contextCards = contextCardIds.map((cardId) => cardMap.get(cardId)).filter((card): card is KanbanCard => Boolean(card));
+  const hasMultiContext = contextCards.length > 1;
+  const parentCandidates = allCards.filter((card) => !contextCardIds.includes(card.id));
   const codexContribution = extensions.find((extension) => extension.pluginId === "codex-board-bar") ?? null;
   const activeAutomations = extensions.filter((extension) => extension.kind === "automation" && extension.enabled);
 
@@ -1575,6 +1643,10 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
   function handleCardContextMenu(cardId: string, event: React.MouseEvent<HTMLElement>) {
     event.preventDefault();
     event.stopPropagation();
+    if (!selectedCardIds.has(cardId)) {
+      setSelectedCardIds(new Set([cardId]));
+      setLastSelectedCardId(cardId);
+    }
     setCardContextMenu({
       cardId,
       x: Math.min(event.clientX, window.innerWidth - 280),
@@ -1585,7 +1657,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
   }
 
   function handleMoveUnderParent() {
-    if (!cardContextMenu || !contextParentId) {
+    if (!cardContextMenu || !contextParentId || hasMultiContext) {
       return;
     }
 
@@ -1605,7 +1677,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
   }
 
   function handleEditContextCard() {
-    if (!contextCard) {
+    if (!contextCard || hasMultiContext) {
       return;
     }
 
@@ -1622,7 +1694,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
       return;
     }
 
-    void navigator.clipboard.writeText(`[[${note.path}#${contextCard.title}]]`);
+    void navigator.clipboard.writeText(contextCards.map((card) => `[[${note.path}#${card.title}]]`).join("\n"));
     setCardContextMenu(null);
   }
 
@@ -1631,7 +1703,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
       return;
     }
 
-    persistContextBoard(moveCardToLane(board, cardContextMenu.cardId, contextLaneId));
+    persistContextBoard(moveCardsToLane(board, contextCardIds, contextLaneId));
   }
 
   function handleDragStart(event: DragStartEvent) {
@@ -2038,25 +2110,27 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
           role="menu"
           onClick={(event) => event.stopPropagation()}
         >
-          <div className="kanban-context-menu__title">{contextCard.title}</div>
+          <div className="kanban-context-menu__title">
+            {hasMultiContext ? `${contextCards.length} selected cards` : contextCard.title}
+          </div>
           <div className="kanban-context-menu__items">
-            <button type="button" onClick={handleEditContextCard}>Edit card</button>
+            <button type="button" disabled={hasMultiContext} onClick={handleEditContextCard}>Edit card</button>
             <button type="button" disabled>New note from card</button>
-            <button type="button" onClick={handleCopyLinkToCard}>Copy link to card</button>
+            <button type="button" onClick={handleCopyLinkToCard}>{hasMultiContext ? "Copy links to cards" : "Copy link to card"}</button>
             <button type="button" disabled>Split card</button>
-            <button type="button" onClick={() => persistContextBoard(duplicateCard(board, contextCard.id))}>Duplicate card</button>
-            <button type="button" onClick={() => persistContextBoard(insertCardRelative(board, contextCard.id, "before"))}>Insert card before</button>
-            <button type="button" onClick={() => persistContextBoard(insertCardRelative(board, contextCard.id, "after"))}>Insert card after</button>
-            <button type="button" onClick={() => persistContextBoard(moveCardToEdge(board, contextCard.id, "top"))}>Move to top</button>
-            <button type="button" onClick={() => persistContextBoard(moveCardToEdge(board, contextCard.id, "bottom"))}>Move to bottom</button>
+            <button type="button" onClick={() => persistContextBoard(duplicateCards(board, contextCardIds))}>{hasMultiContext ? "Duplicate cards" : "Duplicate card"}</button>
+            <button type="button" disabled={hasMultiContext} onClick={() => persistContextBoard(insertCardRelative(board, contextCard.id, "before"))}>Insert card before</button>
+            <button type="button" disabled={hasMultiContext} onClick={() => persistContextBoard(insertCardRelative(board, contextCard.id, "after"))}>Insert card after</button>
+            <button type="button" onClick={() => persistContextBoard(moveCardsToEdge(board, contextCardIds, "top"))}>Move to top</button>
+            <button type="button" onClick={() => persistContextBoard(moveCardsToEdge(board, contextCardIds, "bottom"))}>Move to bottom</button>
             <button type="button" disabled>Archive card</button>
-            <button type="button" onClick={() => persistContextBoard(deleteCard(board, contextCard.id))}>Delete card</button>
+            <button type="button" onClick={() => persistContextBoard(deleteCards(board, contextCardIds))}>{hasMultiContext ? "Delete cards" : "Delete card"}</button>
             <button type="button" disabled>Add date</button>
             <button type="button" disabled>Add time</button>
           </div>
           <label className="kanban-context-menu__field">
             <span>Move under another project</span>
-            <select value={contextParentId} onChange={(event) => setContextParentId(event.currentTarget.value)}>
+            <select disabled={hasMultiContext} value={contextParentId} onChange={(event) => setContextParentId(event.currentTarget.value)}>
               <option value="">Choose project</option>
               {parentCandidates.map((card) => (
                 <option value={card.id} key={card.id}>
@@ -2068,7 +2142,7 @@ export function KanbanBoard({ note, extensions, onPersist, onOpenResource, onRun
           <button
             className="kanban-toolbar-button kanban-toolbar-button--primary"
             type="button"
-            disabled={!contextParentId}
+            disabled={!contextParentId || hasMultiContext}
             onClick={handleMoveUnderParent}
           >
             Move
