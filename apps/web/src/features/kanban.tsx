@@ -26,6 +26,8 @@ import { CSS } from "@dnd-kit/utilities";
 import { FolderOpen, GitBranch, Globe2, GripVertical, LoaderCircle, Lock, PanelLeftClose, PanelLeftOpen, RefreshCw, Search, Sparkles, Timer, X } from "lucide-react";
 import { parse as parseYaml } from "yaml";
 import type { ExtensionActionResponse, ExtensionContribution, NoteDetail } from "@obsidian-web-local/shared";
+import { AgenticComposer, AgenticMarkdown } from "@ainorthstar/agentic-ai-bar/src/react";
+import "@ainorthstar/agentic-ai-bar/src/react.css";
 
 type AttributeDefinition = {
   key: string;
@@ -2248,31 +2250,28 @@ export function KanbanBoard({
 
       {showCodexBar && codexContribution ? (
         <div className="kanban-codex-bar">
-          <textarea
-            className="kanban-codex-bar__prompt"
-            rows={3}
-            placeholder="Move stale search projects to not doing and bump important active work."
+          <AgenticComposer
             value={codexPrompt}
-            onChange={(event) => setCodexPrompt(event.target.value)}
+            busy={isRunningCodex}
+            onChange={setCodexPrompt}
+            onSubmit={() => void runCodex()}
+            placeholder="Move stale search projects to not doing and bump important active work."
+            submitLabel={isRunningCodex ? "Running" : "Apply with Codex"}
+            extraActions={
+              <label className="kanban-field">
+                <span>Max edits</span>
+                <input
+                  className="kanban-input"
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={codexMaxEdits}
+                  onChange={(event) => setCodexMaxEdits(Math.max(1, Number.parseInt(event.target.value || "1", 10) || 1))}
+                />
+              </label>
+            }
           />
-          <div className="kanban-codex-bar__actions">
-            <label className="kanban-field">
-              <span>Max edits</span>
-              <input
-                className="kanban-input"
-                type="number"
-                min={1}
-                step={1}
-                value={codexMaxEdits}
-                onChange={(event) => setCodexMaxEdits(Math.max(1, Number.parseInt(event.target.value || "1", 10) || 1))}
-              />
-            </label>
-            <button className="kanban-toolbar-button kanban-toolbar-button--primary" type="button" onClick={() => void runCodex()}>
-              {isRunningCodex ? <LoaderCircle size={14} className="spin" /> : <Sparkles size={14} />}
-              <span>{isRunningCodex ? "Running" : "Apply with Codex"}</span>
-            </button>
-          </div>
-          {codexOutput ? <pre className="kanban-codex-bar__output">{codexOutput}</pre> : null}
+          {codexOutput ? <AgenticMarkdown className="kanban-codex-bar__output" text={codexOutput} /> : null}
         </div>
       ) : null}
 

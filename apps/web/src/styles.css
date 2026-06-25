@@ -546,6 +546,13 @@ code {
   border: 1px solid #3a3a3a;
   border-radius: 8px;
   background: #252525;
+  --agentic-line: #444;
+  --agentic-field: #1c1c1c;
+  --agentic-ink: #dadada;
+  --agentic-accent: #5d8dff;
+  --agentic-accent-ink: #ffffff;
+  --agentic-soft: #2d2d2d;
+  --agentic-muted: #a8a8a8;
 }
 
 .kanban-focus-timer {
@@ -606,6 +613,19 @@ code {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.kanban-codex-bar .agentic-composer {
+  grid-template-columns: minmax(0, 1fr) 112px auto;
+}
+
+.kanban-codex-bar .agentic-input {
+  min-height: 78px;
+  max-height: 150px;
+}
+
+.kanban-codex-bar .agentic-send {
+  white-space: nowrap;
 }
 
 .kanban-codex-bar__output {
